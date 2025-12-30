@@ -294,7 +294,6 @@ function data.TrackPetSummon(petName, petJob)
         data.petExpireTime = nil;
         data.petType = nil;
         data.lastTrackedPetName = nil;
-        data.charmExpireTime = nil;
 
         -- Reset charm state only if we're not currently processing a charm
         if (data.charmState == data.CharmState.NONE) then
@@ -308,7 +307,6 @@ function data.TrackPetSummon(petName, petJob)
             gConfig.petBarPetExpireTime = nil;
             gConfig.petBarPetType = nil;
             gConfig.petBarPetName = nil;
-            gConfig.petBarCharmExpireTime = nil;
         end
         return;
     end
