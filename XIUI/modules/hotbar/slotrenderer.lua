@@ -648,115 +648,27 @@ function M.DrawSlot(resources, params)
     end
 
     -- ========================================
-    -- 4. Icon Rendering (Primitive for file-based, ImGui for memory-based)
+    -- 4. Icon Rendering (ImGui AddImageRounded for rounded corners)
     -- ========================================
     local iconRendered = false;
 
-    -- Try primitive rendering first (for icons with file paths like spell icons)
+    -- Icon corner rounding (proportional to icon size, matching slot background style)
+    local iconRounding = math.floor(targetIconSize * 0.12);  -- ~4px for 32px icon
+
+    -- Hide primitive if it exists (we now use ImGui for all icon rendering)
     if resources.iconPrim then
-        if icon and icon.path then
-            -- Only set texture path if changed (expensive D3D operation)
-            if cache and cache.iconPath ~= icon.path then
-                resources.iconPrim.texture = icon.path;
-                cache.iconPath = icon.path;
-                -- Clear cached dimensions when texture changes
-                cache.iconTexWidth = nil;
-                cache.iconTexHeight = nil;
-            end
-
-            -- Read ACTUAL texture dimensions from primitive (cached after first read)
-            local texWidth, texHeight;
-            if cache and cache.iconTexWidth then
-                texWidth = cache.iconTexWidth;
-                texHeight = cache.iconTexHeight;
-            else
-                texWidth = resources.iconPrim.width;
-                texHeight = resources.iconPrim.height;
-                -- Fallback if dimensions not available
-                if not texWidth or texWidth <= 0 then texWidth = 40; end
-                if not texHeight or texHeight <= 0 then texHeight = 40; end
-                if cache then
-                    cache.iconTexWidth = texWidth;
-                    cache.iconTexHeight = texHeight;
-                end
-            end
-
-            -- Calculate scale to fit icon within slot with padding
-            local scale = targetIconSize / math.max(texWidth, texHeight);
-
-            -- Calculate actual rendered size after scaling
-            local renderedWidth = texWidth * scale;
-            local renderedHeight = texHeight * scale;
-
-            -- Center the icon within the slot
-            local iconX = x + (size - renderedWidth) / 2;
-            local iconY = y + (size - renderedHeight) / 2;
-
-            -- Only update position/scale if changed
-            if cache and (cache.iconX ~= iconX or cache.iconY ~= iconY or cache.iconScale ~= scale) then
-                resources.iconPrim.position_x = iconX;
-                resources.iconPrim.position_y = iconY;
-                resources.iconPrim.scale_x = scale;
-                resources.iconPrim.scale_y = scale;
-                cache.iconX = iconX;
-                cache.iconY = iconY;
-                cache.iconScale = scale;
-            end
-
-            -- Calculate color: unavailable/cooldown/noMP darkening + dim factor + animation opacity
-            local colorMult = 1.0;
-            local applyGreyTint = false;
-            if isUnavailable then
-                colorMult = 0.35;  -- Significantly dimmed when unavailable
-                applyGreyTint = true;  -- Apply grey/desaturated tint
-            elseif isOnCooldown then
-                colorMult = 0.4;
-            elseif notEnoughMp then
-                colorMult = 0.6;  -- Slightly dimmed when not enough MP
-            end
-            colorMult = colorMult * dimFactor;
-
-            -- Calculate RGB values
-            local r, g, b;
-            if applyGreyTint then
-                -- Grey tint for unavailable actions (desaturated)
-                local grey = math.floor(180 * colorMult);  -- Lighter grey base
-                r, g, b = grey, grey, grey;
-            else
-                local rgb = math.floor(255 * colorMult);
-                r, g, b = rgb, rgb, rgb;
-            end
-
-            local alpha = math.floor(255 * animOpacity * (isUnavailable and 0.7 or 1.0));  -- Lower opacity when unavailable
-            local iconColor = bit.bor(
-                bit.lshift(alpha, 24),
-                bit.lshift(r, 16),
-                bit.lshift(g, 8),
-                b
-            );
-
-            -- Only update color if changed
-            if cache and cache.iconColor ~= iconColor then
-                resources.iconPrim.color = iconColor;
-                cache.iconColor = iconColor;
-            end
-            resources.iconPrim.visible = true;
-            iconRendered = true;
-        else
-            resources.iconPrim.visible = false;
-            if cache then cache.iconPath = nil; end
-        end
+        resources.iconPrim.visible = false;
     end
 
-    -- Fallback to ImGui rendering for icons without paths (item icons loaded from game memory)
-    if not iconRendered and icon and icon.image then
+    -- Render icon using ImGui AddImageRounded for consistent rounded corners
+    if icon and icon.image then
         local drawList = imgui.GetWindowDrawList();
         if drawList then
             local iconPtr = tonumber(ffi.cast("uint32_t", icon.image));
             if iconPtr then
-                -- Get icon dimensions (item icons are typically 32x32)
-                local texWidth = icon.width or 32;
-                local texHeight = icon.height or 32;
+                -- Get icon dimensions (spell icons are 40x40, item icons are 32x32)
+                local texWidth = icon.width or 40;
+                local texHeight = icon.height or 40;
 
                 -- Calculate scale to fit icon within slot with padding
                 local scale = targetIconSize / math.max(texWidth, texHeight);
@@ -800,12 +712,14 @@ function M.DrawSlot(resources, params)
                     b
                 );
 
-                drawList:AddImage(
+                -- Use AddImageRounded for rounded corners matching slot background
+                drawList:AddImageRounded(
                     iconPtr,
                     {iconX, iconY},
                     {iconX + renderedWidth, iconY + renderedHeight},
                     {0, 0}, {1, 1},
-                    tintColor
+                    tintColor,
+                    iconRounding
                 );
                 iconRendered = true;
             end
