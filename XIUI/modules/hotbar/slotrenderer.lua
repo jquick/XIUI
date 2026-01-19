@@ -661,8 +661,9 @@ function M.DrawSlot(resources, params)
     end
 
     -- Render icon using ImGui AddImageRounded for consistent rounded corners
+    -- Use GetBackgroundDrawList to render behind GDI fonts (keybinds, MP cost, etc.)
     if icon and icon.image then
-        local drawList = imgui.GetWindowDrawList();
+        local drawList = imgui.GetBackgroundDrawList();
         if drawList then
             local iconPtr = tonumber(ffi.cast("uint32_t", icon.image));
             if iconPtr then
