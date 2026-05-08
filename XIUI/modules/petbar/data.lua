@@ -1495,7 +1495,7 @@ function data.calculateCharmTime(mobLevel)
     -- Set base values
     local player = AshitaCore:GetMemoryManager():GetPlayer();
     local playerLvl = player:GetMainJobLevel();
-    local baseChr   = player:GetStat(6);
+    local baseChr   = player:GetStat(6) + player:GetStatsModifiers(6);
 
     -- calculate level difference between player & pet
     local levelDifference = playerLvl - mobLevel;
