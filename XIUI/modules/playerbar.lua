@@ -349,8 +349,8 @@ playerbar.DrawWindow = function(settings)
 			local width = barSize - shimmerBookendWidth * 2 - (padding * 2);
 			local waveWidth = width * 0.06;
 			local x = hpBarStartX + shimmerBookendWidth + padding;
-			local y1 = hpBarStartY + padding;
-			local y2 = hpBarStartY + settings.barHeight - padding;
+			local y1 = hpBarStartY;
+			local y2 = hpBarStartY + settings.barHeight;
 			local waveLeft = x + (progress * (width - waveWidth));
 			local waveRight = waveLeft + waveWidth;
 			
