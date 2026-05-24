@@ -5,6 +5,7 @@
 ]]--
 
 require('common');
+local encoding = require('libs.encoding');
 
 local M = {};
 
@@ -86,7 +87,9 @@ function M.GetPlayerSpells()
         if player:HasSpell(spellId) then
             local spell = resMgr:GetSpellById(spellId);
             if spell and spell.Name and spell.Name[1] and spell.Name[1] ~= '' then
-                local spellName = spell.Name[1];
+                -- Resource manager returns ShiftJIS bytes; convert to UTF-8 so the
+                -- name is safe to hand to ImGui downstream.
+                local spellName = encoding:ShiftJIS_To_UTF8(spell.Name[1], true);
 
                 -- Skip garbage/test spell names
                 if not IsGarbageSpellName(spellName) then
@@ -216,7 +219,7 @@ function M.GetPlayerAbilities()
             local ability = resMgr:GetAbilityById(abilityId);
             if ability and ability.Name and ability.Name[1] and ability.Name[1] ~= '' then
                 local abilityType = ability.Type or 0;
-                local abilityName = ability.Name[1];
+                local abilityName = encoding:ShiftJIS_To_UTF8(ability.Name[1], true);
 
                 -- Exclude: weapon skills (separate dropdown), passive traits (not
                 -- macroable), pet commands (separate section), and subcategory
@@ -284,7 +287,7 @@ function M.GetPlayerWeaponskills()
             if ability and ability.Name and ability.Name[1] and ability.Name[1] ~= '' then
                 local abilityType = ability.Type or 0;
                 if abilityType == ABILITY_TYPE.WeaponSkill then
-                    local wsName = ability.Name[1];
+                    local wsName = encoding:ShiftJIS_To_UTF8(ability.Name[1], true);
                     if not addedWeaponskills[wsName] then
                         table.insert(weaponskills, {
                             id = abilityId,
@@ -325,7 +328,7 @@ function M.GetPlayerItems()
                 if item and item.Id and item.Id > 0 and item.Id ~= 65535 then
                     local itemRes = resMgr:GetItemById(item.Id);
                     if itemRes and itemRes.Name and itemRes.Name[1] and itemRes.Name[1] ~= '' then
-                        local itemName = itemRes.Name[1];
+                        local itemName = encoding:ShiftJIS_To_UTF8(itemRes.Name[1], true);
                         -- Only add if we haven't seen this item name yet
                         if not seenItems[itemName] then
                             seenItems[itemName] = true;

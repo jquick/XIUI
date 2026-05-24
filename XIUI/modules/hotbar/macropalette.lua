@@ -18,6 +18,7 @@ local petpalette = require('modules.hotbar.petpalette');
 local petregistry = require('modules.hotbar.petregistry');
 local playerdata = require('modules.hotbar.playerdata');
 local actiondb = require('modules.hotbar.actiondb');
+local encoding = require('libs.encoding');
 -- display and crossbar are loaded lazily to avoid circular dependencies
 local display = nil;
 local crossbar = nil;
@@ -565,7 +566,7 @@ local function LoadItemIconBatch()
     for itemId = itemIconLoadState.currentId + 1, endId do
         local item = resMgr:GetItemById(itemId);
         if item and item.Name and item.Name[1] and item.Name[1] ~= '' then
-            local itemName = item.Name[1];
+            local itemName = encoding:ShiftJIS_To_UTF8(item.Name[1], true);
             -- Skip duplicate names using hash table (O(1) lookup)
             if not itemIconLoadState.seenNames[itemName] then
                 itemIconLoadState.seenNames[itemName] = true;

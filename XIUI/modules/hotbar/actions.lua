@@ -10,6 +10,7 @@ local horizonSpells = require('modules.hotbar.database.horizonspells');
 local textures = require('modules.hotbar.textures');
 local macrosLib = require('libs.ffxi.macros');
 local palette = require('modules.hotbar.palette');
+local encoding = require('libs.encoding');
 
 -- Debug logging (controlled via /xiui debug hotbar)
 local DEBUG_ENABLED = false;
@@ -392,6 +393,11 @@ local function buildSpellByNameLookup()
         if spell.en then
             spellByNameLookup[spell.en] = spell;
         end
+        -- Also index by Japanese name so JP-client users (whose cached bind.action
+        -- is the Japanese spell name) can resolve to the same row.
+        if spell.ja then
+            spellByNameLookup[spell.ja] = spell;
+        end
     end
 end
 
@@ -600,7 +606,9 @@ local function LoadItemIconByName(itemName)
 
     for itemId = 1, 65535 do
         local item = resMgr:GetItemById(itemId);
-        if item and item.Name and item.Name[1] == itemName then
+        -- itemName is the cached UTF-8 name; resource is ShiftJIS.
+        if item and item.Name and item.Name[1]
+            and encoding:ShiftJIS_To_UTF8(item.Name[1], true) == itemName then
             itemNameToIdCache[itemName] = itemId;
             return LoadItemIconById(itemId);
         end
@@ -922,7 +930,9 @@ function M.ExecuteCommandString(commandText, isMacro)
                 for i = #lines, 1, -1 do
                     local trimmed = lines[i]:match('^%s*(.-)%s*$');
                     if trimmed and trimmed ~= '' then
-                        chatManager:QueueCommand(2, trimmed);
+                        -- ImGui-edited macro text is UTF-8; the FFXI chat manager
+                        -- expects ShiftJIS bytes. Pure-ASCII lines round-trip.
+                        chatManager:QueueCommand(2, encoding:UTF8_To_ShiftJIS(trimmed, true));
                     end
                 end
             end
@@ -976,7 +986,8 @@ function M.ExecuteCommandString(commandText, isMacro)
             local ok, err = pcall(function()
                 local chatManager = AshitaCore:GetChatManager();
                 if chatManager then
-                    chatManager:QueueCommand(cmdMode, commandToExecute);
+                    -- See note above: UTF-8 (ImGui) -> ShiftJIS (chat manager).
+                    chatManager:QueueCommand(cmdMode, encoding:UTF8_To_ShiftJIS(commandToExecute, true));
                 end
             end);
 

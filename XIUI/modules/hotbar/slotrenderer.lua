@@ -16,6 +16,7 @@ local textures = require('modules.hotbar.textures');
 local skillchain = require('modules.hotbar.skillchain');
 local statusHandler = require('handlers.statushandler');
 local imtext = require('libs.imtext');
+local encoding = require('libs.encoding');
 
 -- Deferred tooltip: stored during render, drawn after all windows to ensure z-order
 local pendingTooltipBind = nil;
@@ -285,7 +286,10 @@ function M.GetItemQuantity(itemId, itemName)
                         match = true;
                     elseif itemName and resMgr then
                         local itemRes = resMgr:GetItemById(item.Id);
-                        if itemRes and itemRes.Name and itemRes.Name[1] == itemName then
+                        -- Cached `itemName` is UTF-8; resource name is ShiftJIS.
+                        -- Convert before comparing so non-ASCII names match.
+                        if itemRes and itemRes.Name and itemRes.Name[1]
+                            and encoding:ShiftJIS_To_UTF8(itemRes.Name[1], true) == itemName then
                             match = true;
                         end
                     end

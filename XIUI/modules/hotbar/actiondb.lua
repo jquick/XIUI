@@ -3,6 +3,8 @@
 * Maps action names to spell/ability IDs for recast lookups
 ]]--
 
+local encoding = require('libs.encoding');
+
 local M = {};
 
 -- Lookup tables (built on first use)
@@ -21,7 +23,8 @@ local function BuildSpellLookup()
     for id = 0, 1024 do
         local spell = resourceMgr:GetSpellById(id);
         if spell and spell.Name and spell.Name[1] then
-            local name = spell.Name[1]:lower();
+            -- Keys are UTF-8 to match cached bind.action strings.
+            local name = encoding:ShiftJIS_To_UTF8(spell.Name[1], true):lower();
             M.spellNameToId[name] = id;
         end
     end
@@ -38,7 +41,7 @@ local function BuildAbilityLookup()
     for id = 0, 1024 do
         local ability = resourceMgr:GetAbilityById(id);
         if ability and ability.Name and ability.Name[1] then
-            local name = ability.Name[1]:lower();
+            local name = encoding:ShiftJIS_To_UTF8(ability.Name[1], true):lower();
             M.abilityNameToId[name] = id;
         end
     end
@@ -69,7 +72,7 @@ local function BuildItemLookup()
     for id = 1, 65535 do
         local item = resourceMgr:GetItemById(id);
         if item and item.Name and item.Name[1] then
-            local name = item.Name[1]:lower();
+            local name = encoding:ShiftJIS_To_UTF8(item.Name[1], true):lower();
             M.itemNameToId[name] = id;
         end
     end
