@@ -197,8 +197,9 @@ function containerlogic.build_slot_data(satchel)
             return false
         end
 
+        local safe2_used = tonumber(inv:GetContainerCount(9) or 0) or 0
         local sample_count = math.min(safe2_max, 10)
-        local saw_readable_slot = false
+        local saw_distinct_index = false
         for slot_index = 1, sample_count do
             local ok, item = pcall(function()
                 return inv:GetContainerItem(9, slot_index)
@@ -210,22 +211,19 @@ function containerlogic.build_slot_data(satchel)
                 return false
             end
 
-            saw_readable_slot = true
-
             local raw_index = item and tonumber(item.Index) or 0
             if raw_index >= 81 then
+                saw_distinct_index = true
                 if satchel then
                     satchel.safe2_support_cache = { checked_at = now, value = true }
                 end
                 return true
             end
-
-            if raw_index > 0 and raw_index <= 80 then
-                -- Ambiguous on some servers; defer the final decision to mirror detection.
-            end
         end
 
-        if saw_readable_slot then
+        -- Conservative fallback: if the container has contents, allow mirror detection
+        -- to determine if it is a distinct container or an alias of Mog Safe.
+        if safe2_used > 0 or saw_distinct_index then
             if satchel then
                 satchel.safe2_support_cache = { checked_at = now, value = true }
             end
