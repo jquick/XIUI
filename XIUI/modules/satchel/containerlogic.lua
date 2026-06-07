@@ -28,6 +28,15 @@ containerlogic.tab_order = { 0, 1, 9, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14, 1
 
 local canonical_containers = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 }
 
+local function append_unique(list, value)
+    for _, existing in ipairs(list) do
+        if tonumber(existing) == tonumber(value) then
+            return
+        end
+    end
+    list:append(value)
+end
+
 function containerlogic.normalize_include_containers(value)
     local existing = {}
     if type(value) == 'table' then
@@ -46,12 +55,15 @@ function containerlogic.normalize_include_containers(value)
         end
     end
 
-    if #normalized < #canonical_containers then
+    if #normalized == 0 then
         normalized = T{}
         for _, id in ipairs(canonical_containers) do
             normalized:append(id)
         end
     end
+
+    -- Mog Safe is always available in supported environments and should never be hidden.
+    append_unique(normalized, 1)
 
     return normalized
 end
@@ -93,6 +105,39 @@ function containerlogic.build_slot_data(satchel)
             return false
         end
 
+        -- If both are empty, we still attempt to infer mirror behavior from slot indices.
+        if safe_used <= 0 and safe2_used <= 0 then
+            local sample_count = math.min(safe_max, safe2_max, 10)
+            local appears_distinct = false
+
+            for slot_index = 1, sample_count do
+                local ok_safe, safe_item = pcall(function()
+                    return inv:GetContainerItem(1, slot_index)
+                end)
+                local ok_safe2, safe2_item = pcall(function()
+                    return inv:GetContainerItem(9, slot_index)
+                end)
+
+                if not ok_safe or not ok_safe2 then
+                    appears_distinct = true
+                    break
+                end
+
+                local safe_index = (safe_item and tonumber(safe_item.Index)) or 0
+                local safe2_index = (safe2_item and tonumber(safe2_item.Index)) or 0
+
+                if safe2_index >= 81 or safe_index ~= safe2_index then
+                    appears_distinct = true
+                    break
+                end
+            end
+
+            if satchel then
+                satchel.safe2_mirror_cache = { checked_at = now, value = not appears_distinct }
+            end
+            return not appears_distinct
+        end
+
         if safe_used <= 0 then
             if satchel then
                 satchel.safe2_mirror_cache = { checked_at = now, value = false }
@@ -120,8 +165,10 @@ function containerlogic.build_slot_data(satchel)
             local safe2_id = (safe2_item and tonumber(safe2_item.Id)) or 0
             local safe_count = (safe_item and tonumber(safe_item.Count)) or 0
             local safe2_count = (safe2_item and tonumber(safe2_item.Count)) or 0
+            local safe_index = (safe_item and tonumber(safe_item.Index)) or 0
+            local safe2_index = (safe2_item and tonumber(safe2_item.Index)) or 0
 
-            if safe_id ~= safe2_id or safe_count ~= safe2_count then
+            if safe_id ~= safe2_id or safe_count ~= safe2_count or safe_index ~= safe2_index then
                 if satchel then
                     satchel.safe2_mirror_cache = { checked_at = now, value = false }
                 end
@@ -151,6 +198,7 @@ function containerlogic.build_slot_data(satchel)
         end
 
         local sample_count = math.min(safe2_max, 10)
+        local saw_readable_slot = false
         for slot_index = 1, sample_count do
             local ok, item = pcall(function()
                 return inv:GetContainerItem(9, slot_index)
@@ -162,6 +210,8 @@ function containerlogic.build_slot_data(satchel)
                 return false
             end
 
+            saw_readable_slot = true
+
             local raw_index = item and tonumber(item.Index) or 0
             if raw_index >= 81 then
                 if satchel then
@@ -171,11 +221,15 @@ function containerlogic.build_slot_data(satchel)
             end
 
             if raw_index > 0 and raw_index <= 80 then
-                if satchel then
-                    satchel.safe2_support_cache = { checked_at = now, value = false }
-                end
-                return false
+                -- Ambiguous on some servers; defer the final decision to mirror detection.
             end
+        end
+
+        if saw_readable_slot then
+            if satchel then
+                satchel.safe2_support_cache = { checked_at = now, value = true }
+            end
+            return true
         end
 
         if satchel then
@@ -244,6 +298,10 @@ function containerlogic.build_slot_data(satchel)
         local cid = tonumber(container_id)
         if cid == nil then
             return false
+        end
+
+        if cid == 1 then
+            return (tonumber(max_slots) or 0) > 0
         end
 
         if cid == 9 then
