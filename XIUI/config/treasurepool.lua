@@ -63,8 +63,7 @@ function M.DrawSettings()
     ensureDefaults();
 
     components.DrawCheckbox('Enabled', 'treasurePoolEnabled', CheckVisibility);
-    components.DrawCheckbox('Hide When Menu Open', 'treasurePoolHideOnMenuFocus');
-    imgui.ShowHelp('Hide this module when a game menu is open (equipment, map, etc.).');
+    components.DrawHideWhenMenuOpenOptions('treasurePoolHideOnMenuFocus', 'treasurePoolHideMacroPalette');
     components.DrawCheckbox('Preview', 'treasurePoolPreview', onPreviewChanged);
 
     if components.CollapsingSection('Display Settings', true) then
@@ -101,7 +100,7 @@ function M.DrawSettings()
         -- Background theme dropdown
         local themes = getBackgroundThemes();
         components.Combo('Theme##treasurePoolBg', gConfig, 'treasurePoolBackgroundTheme',
-            themes, nil, 'Plain', function() UpdateSettings(); end);
+            themes, nil, 'Plain', function() SaveSettingsOnly(); DeferredUpdateVisuals(); end);
         imgui.ShowHelp('Window background style (Plain = solid, Window1-8 = themed with borders)');
 
         -- Scale/opacity sliders

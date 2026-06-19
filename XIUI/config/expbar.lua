@@ -13,12 +13,13 @@ local M = {};
 -- Section: Exp Bar Settings
 function M.DrawSettings()
     components.DrawCheckbox('Enabled', 'showExpBar', CheckVisibility);
-    components.DrawCheckbox('Hide When Menu Open', 'expBarHideOnMenuFocus');
-    imgui.ShowHelp('Hide this module when a game menu is open (equipment, map, etc.).');
+    components.DrawHideWhenMenuOpenOptions('expBarHideOnMenuFocus', 'expBarHideMacroPalette');
 
     if components.CollapsingSection('Display Options##expBar') then
         components.DrawCheckbox('Limit Points Mode', 'expBarLimitPointsMode');
         imgui.ShowHelp('Shows Limit Points if character is set to earn Limit Points in the game.');
+        components.DrawCheckbox('Mastery Mode', 'expBarMasteryMode');
+        imgui.ShowHelp('Shows Master Level Exemplar Points instead of Capacity Points once your main job is level 99. Useful when JP is capped at 500 and you want to track ML progress.');
         components.DrawCheckbox('Inline Mode', 'expBarInlineMode');
         components.DrawCheckbox('Show Bookends', 'showExpBarBookends');
         components.DrawCheckbox('Show Text', 'expBarShowText');

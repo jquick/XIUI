@@ -6,11 +6,6 @@ local ffi = require("ffi");
 local defaultPositions = require('libs.defaultpositions');
 local TextureManager = require('libs.texturemanager');
 
--- Position save/restore state
-local hasAppliedSavedPosition = false;
-local forcePositionReset = false;
-local lastSavedPosX, lastSavedPosY = nil, nil;
-
 -- Gil texture (loaded via TextureManager)
 local gilTexture;
 
@@ -120,12 +115,6 @@ giltracker.DrawWindow = function(settings)
 
 	local currentGil = gilAmount.Count;
 
-	-- Skip invalid reads during zoning (inventory returns 0 or garbage)
-	-- This preserves tracking state so we continue where we left off after zoning
-	if currentGil == 0 then
-		return;
-	end
-
 	-- Detect invalid reads: if gil changes by millions in a single frame, it's likely
 	-- garbage data from zoning - skip this frame but don't reset tracking
 	if lastKnownGil ~= nil and lastKnownGil > 0 then
@@ -204,20 +193,6 @@ giltracker.DrawWindow = function(settings)
 
     imgui.SetNextWindowSize({ -1, -1, }, ImGuiCond_Always);
 	local windowFlags = GetBaseWindowFlags(gConfig.lockPositions);
-
-	-- Handle position reset or restore
-	if forcePositionReset then
-		local defX, defY = defaultPositions.GetGilTrackerPosition();
-		imgui.SetNextWindowPos({defX, defY}, ImGuiCond_Always);
-		forcePositionReset = false;
-		hasAppliedSavedPosition = true;
-		lastSavedPosX, lastSavedPosY = defX, defY;
-	elseif not hasAppliedSavedPosition and gConfig.gilTrackerWindowPosX ~= nil then
-		imgui.SetNextWindowPos({gConfig.gilTrackerWindowPosX, gConfig.gilTrackerWindowPosY}, ImGuiCond_Once);
-		hasAppliedSavedPosition = true;
-		lastSavedPosX = gConfig.gilTrackerWindowPosX;
-		lastSavedPosY = gConfig.gilTrackerWindowPosY;
-	end
 
 	local showIcon = settings.showIcon;
 
@@ -464,8 +439,13 @@ giltracker.ResetTracking = function()
 end
 
 giltracker.ResetPositions = function()
-	forcePositionReset = true;
-	hasAppliedSavedPosition = false;
+	local defX, defY = defaultPositions.GetGilTrackerPosition();
+	if gConfig.windowPositions then
+		gConfig.windowPositions['GilTracker'] = { x = defX, y = defY };
+	end
+	if gConfig.appliedPositions then
+		gConfig.appliedPositions['GilTracker'] = nil;
+	end
 end
 
 -- Zone packet handlers are no-ops. Login detection is performed via

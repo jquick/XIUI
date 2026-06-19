@@ -6,7 +6,6 @@
 require('common');
 local ffi = require('ffi');
 local statusHandler = require('handlers.statushandler');
-local windowBg = require('libs.windowbackground');
 
 local data = {};
 
@@ -32,12 +31,6 @@ data.fullMenuWidth = {};
 data.fullMenuHeight = {};
 data.buffWindowX = {};
 data.debuffWindowX = {};
-
-data.partyWindowPrim = {
-    [1] = { background = {} },
-    [2] = { background = {} },
-    [3] = { background = {} },
-};
 
 data.cursorTextures = T{};
 data.currentCursorName = nil;
@@ -67,9 +60,6 @@ data.cachedFontSizes = {12, 12, 12};
 data.cachedFontFamily = '';
 data.cachedFontFlags = 0;
 data.cachedOutlineWidth = 2;
-
--- Track loaded backgrounds per party
-data.loadedBg = {};
 
 -- Debounce settings save
 data.lastSettingsSaveTime = 0;
@@ -141,6 +131,9 @@ end
 function data.updatePartyConfigCache()
     if data.partyConfigCacheValid then return; end
 
+    -- Global UI scale multiplier (stacks on top of per-party scales)
+    local globalScale = gConfig.globalScale or 1.0;
+
     for partyIndex = 1, 3 do
         local cache = data.partyConfigCache[partyIndex];
         local party = data.getPartySettings(partyIndex);
@@ -148,9 +141,9 @@ function data.updatePartyConfigCache()
 
         -- Scale
         if cache.scale == nil then cache.scale = {}; end
-        cache.scale.x = party.scaleX or 1;
-        cache.scale.y = party.scaleY or 1;
-        cache.scale.icon = party.jobIconScale or 1;
+        cache.scale.x = (party.scaleX or 1) * globalScale;
+        cache.scale.y = (party.scaleY or 1) * globalScale;
+        cache.scale.icon = (party.jobIconScale or 1) * globalScale;
 
         -- ShowTP
         cache.showTP = party.showTP;
@@ -170,16 +163,16 @@ function data.updatePartyConfigCache()
         cache.showCastBars = party.showCastBars;
         cache.castBarScaleX = party.castBarScaleX or 1.0;
         cache.castBarScaleY = party.castBarScaleY or 0.6;
-        cache.castBarOffsetX = party.castBarOffsetX or 0;
-        cache.castBarOffsetY = party.castBarOffsetY or 0;
+        cache.castBarOffsetX = (party.castBarOffsetX or 0) * globalScale;
+        cache.castBarOffsetY = (party.castBarOffsetY or 0) * globalScale;
         cache.castBarAnchor = party.castBarAnchor ~= false;
         cache.castBarStyle = party.castBarStyle or 'name';
         cache.showBookends = party.showBookends;
         cache.showTitle = party.showTitle;
         cache.flashTP = party.flashTP;
         cache.backgroundName = party.backgroundName;
-        cache.bgScale = party.bgScale or 1;
-        cache.borderScale = party.borderScale or 1;
+        cache.bgScale = (party.bgScale or 1) * globalScale;
+        cache.borderScale = (party.borderScale or 1) * globalScale;
         cache.backgroundOpacity = party.backgroundOpacity or 1;
         cache.borderOpacity = party.borderOpacity or 1;
         cache.cursor = party.cursor;
@@ -188,8 +181,8 @@ function data.updatePartyConfigCache()
         cache.statusTheme = party.statusTheme or 0;
         cache.statusSide = party.statusSide or 0;
         cache.buffScale = party.buffScale or 1;
-        cache.statusOffsetX = party.statusOffsetX or 0;
-        cache.statusOffsetY = party.statusOffsetY or 0;
+        cache.statusOffsetX = (party.statusOffsetX or 0) * globalScale;
+        cache.statusOffsetY = (party.statusOffsetY or 0) * globalScale;
         cache.expandHeight = party.expandHeight;
         cache.expandHeightInAlliance = party.expandHeightInAlliance;
         cache.alignBottom = party.alignBottom;
@@ -197,7 +190,7 @@ function data.updatePartyConfigCache()
         cache.entrySpacing = party.entrySpacing or 0;
         cache.showSelectionBox = party.showSelectionBox ~= false;
         cache.selectionBoxScaleY = party.selectionBoxScaleY or 1;
-        cache.selectionBoxOffsetY = party.selectionBoxOffsetY or 0;
+        cache.selectionBoxOffsetY = (party.selectionBoxOffsetY or 0) * globalScale;
 
         -- HP/MP display modes
         cache.hpDisplayMode = party.hpDisplayMode or 'number';
@@ -207,15 +200,15 @@ function data.updatePartyConfigCache()
         -- FontSizes
         if cache.fontSizes == nil then cache.fontSizes = {}; end
         if party.splitFontSizes then
-            cache.fontSizes.name = party.nameFontSize or party.fontSize or 12;
-            cache.fontSizes.hp = party.hpFontSize or party.fontSize or 12;
-            cache.fontSizes.mp = party.mpFontSize or party.fontSize or 12;
-            cache.fontSizes.tp = party.tpFontSize or party.fontSize or 12;
-            cache.fontSizes.distance = party.distanceFontSize or party.fontSize or 12;
-            cache.fontSizes.job = party.jobFontSize or party.fontSize or 12;
-            cache.fontSizes.zone = party.zoneFontSize or 10;
+            cache.fontSizes.name = (party.nameFontSize or party.fontSize or 12) * globalScale;
+            cache.fontSizes.hp = (party.hpFontSize or party.fontSize or 12) * globalScale;
+            cache.fontSizes.mp = (party.mpFontSize or party.fontSize or 12) * globalScale;
+            cache.fontSizes.tp = (party.tpFontSize or party.fontSize or 12) * globalScale;
+            cache.fontSizes.distance = (party.distanceFontSize or party.fontSize or 12) * globalScale;
+            cache.fontSizes.job = (party.jobFontSize or party.fontSize or 12) * globalScale;
+            cache.fontSizes.zone = (party.zoneFontSize or 10) * globalScale;
         else
-            local fontSize = party.fontSize or 12;
+            local fontSize = (party.fontSize or 12) * globalScale;
             cache.fontSizes.name = fontSize;
             cache.fontSizes.hp = fontSize;
             cache.fontSizes.mp = fontSize;
@@ -236,18 +229,18 @@ function data.updatePartyConfigCache()
 
         -- Text position offsets (per-party)
         if cache.textOffsets == nil then cache.textOffsets = {}; end
-        cache.textOffsets.nameX = party.nameTextOffsetX or 0;
-        cache.textOffsets.nameY = party.nameTextOffsetY or 0;
-        cache.textOffsets.hpX = party.hpTextOffsetX or 0;
-        cache.textOffsets.hpY = party.hpTextOffsetY or 0;
-        cache.textOffsets.mpX = party.mpTextOffsetX or 0;
-        cache.textOffsets.mpY = party.mpTextOffsetY or 0;
-        cache.textOffsets.tpX = party.tpTextOffsetX or 0;
-        cache.textOffsets.tpY = party.tpTextOffsetY or 0;
-        cache.textOffsets.distanceX = party.distanceTextOffsetX or 0;
-        cache.textOffsets.distanceY = party.distanceTextOffsetY or 0;
-        cache.textOffsets.jobX = party.jobTextOffsetX or 0;
-        cache.textOffsets.jobY = party.jobTextOffsetY or 0;
+        cache.textOffsets.nameX = (party.nameTextOffsetX or 0) * globalScale;
+        cache.textOffsets.nameY = (party.nameTextOffsetY or 0) * globalScale;
+        cache.textOffsets.hpX = (party.hpTextOffsetX or 0) * globalScale;
+        cache.textOffsets.hpY = (party.hpTextOffsetY or 0) * globalScale;
+        cache.textOffsets.mpX = (party.mpTextOffsetX or 0) * globalScale;
+        cache.textOffsets.mpY = (party.mpTextOffsetY or 0) * globalScale;
+        cache.textOffsets.tpX = (party.tpTextOffsetX or 0) * globalScale;
+        cache.textOffsets.tpY = (party.tpTextOffsetY or 0) * globalScale;
+        cache.textOffsets.distanceX = (party.distanceTextOffsetX or 0) * globalScale;
+        cache.textOffsets.distanceY = (party.distanceTextOffsetY or 0) * globalScale;
+        cache.textOffsets.jobX = (party.jobTextOffsetX or 0) * globalScale;
+        cache.textOffsets.jobY = (party.jobTextOffsetY or 0) * globalScale;
 
         -- Color settings reference
         if partyIndex == 1 then
@@ -608,19 +601,8 @@ function data.GetMemberInformation(memIdx)
 end
 
 function data.UpdateTextVisibility(visible, partyIndex)
-    -- Handle background visibility using windowbackground library
-    -- When visible=false, hide backgrounds; when visible=true, backgrounds
-    -- will be shown on next windowBg.update() call in DrawPartyWindow
-    if not visible then
-        for i = 1, 3 do
-            if (partyIndex == nil or i == partyIndex) then
-                local backgroundPrim = data.partyWindowPrim[i].background;
-                if backgroundPrim then
-                    windowBg.hide(backgroundPrim);
-                end
-            end
-        end
-    end
+    -- Immediate-mode rendering: backgrounds are not drawn when DrawPartyWindow isn't called.
+    -- This function is kept as a hook in case future consumers need to react to visibility changes.
 end
 
 -- ============================================
@@ -628,15 +610,9 @@ end
 -- ============================================
 
 function data.Reset()
-    data.partyWindowPrim = {
-        {background = {}},
-        {background = {}},
-        {background = {}}
-    };
     data.maxTpTextWidthCache = { [1] = nil, [2] = nil, [3] = nil };
     data.memberInterpolation = {};
     data.partyCasts = {};
-    data.loadedBg = {};
     data.partyConfigCacheValid = false;
     data.partyConfigCacheVersion = -1;
 end

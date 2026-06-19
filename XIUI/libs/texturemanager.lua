@@ -1,7 +1,6 @@
 --[[
 * XIUI TextureManager
 * Centralized texture loading and caching with LRU eviction
-* Follows FontManager pattern for consistent API design
 *
 * Categories:
 *   - item_icons: Item icons from game resources (treasure pool, notifications)
@@ -61,6 +60,21 @@ local CATEGORY_CONFIG = {
 -- Hash table for O(1) lookup by key
 local texturesByKey = {};
 
+-- Entries evicted or cleared during the current frame. The texture pointer
+-- may still be queued inside an ImGui draw list that hasn't rendered yet, so
+-- we hold the Lua reference until the start of the next d3d_present (via
+-- FlushPendingReleases) before allowing GC to run d3d8.gc_safe_release on
+-- the underlying COM object. Drops without this delay race with the
+-- pending draw call and crash with EXCEPTION_ACCESS_VIOLATION on Ashita
+-- v4.16.
+local pendingReleases = {};
+
+local function deferRelease(entry)
+    if entry ~= nil then
+        pendingReleases[#pendingReleases + 1] = entry;
+    end
+end
+
 -- Per-category arrays for LRU eviction tracking
 local categoryEntries = {
     item_icons = {},
@@ -117,9 +131,11 @@ local function evictIfNeeded(category)
     for i = 1, toEvict do
         local entry = entries[1];
         if entry then
-            -- Remove from hash table
+            -- Remove from hash table and hold the entry alive until next frame
+            -- so any draw call still using its texture pointer can complete.
             texturesByKey[entry.key] = nil;
             table.remove(entries, 1);
+            deferRelease(entry);
             stats.evictions = stats.evictions + 1;
             if stats.byCategory[category] then
                 stats.byCategory[category].evictions = (stats.byCategory[category].evictions or 0) + 1;
@@ -404,8 +420,30 @@ function M.getFileTexture(path)
     end, 'assets');
 end
 
+-- Custom icon roots. Submodule icons are stored with a prefix so the same
+-- relativePath string disambiguates which root to resolve against.
+local CUSTOM_ICON_ROOT_PREFIX_XIUI_ICONS = 'submodules\\xiui-icons\\';
+local CUSTOM_ICON_ROOT_PREFIX_XIUI_ICONS_LEN = #CUSTOM_ICON_ROOT_PREFIX_XIUI_ICONS;
+
+-- Resolve a stored customIconPath to an absolute file path. Legacy entries
+-- (no recognized prefix) resolve under assets/hotbar/custom/.
+-- @param relativePath string
+-- @return string|nil
+function M.ResolveCustomIconPath(relativePath)
+    if relativePath == nil or relativePath == '' then
+        return nil;
+    end
+    local installPath = AshitaCore:GetInstallPath();
+    if relativePath:sub(1, CUSTOM_ICON_ROOT_PREFIX_XIUI_ICONS_LEN) == CUSTOM_ICON_ROOT_PREFIX_XIUI_ICONS then
+        local rest = relativePath:sub(CUSTOM_ICON_ROOT_PREFIX_XIUI_ICONS_LEN + 1);
+        return string.format('%saddons\\XIUI\\submodules\\xiui-icons\\XIUI\\assets\\hotbar\\%s', installPath, rest);
+    end
+    return string.format('%saddons\\XIUI\\assets\\hotbar\\custom\\%s', installPath, relativePath);
+end
+
 -- Get custom icon from hotbar custom icons directory
--- @param relativePath string - Path relative to assets/hotbar/custom/
+-- @param relativePath string - Path relative to assets/hotbar/custom/, or
+--   prefixed with `submodules\xiui-icons\` for icons from the xiui-icons submodule
 -- @return table|nil - Texture table with .image field, or nil
 function M.getCustomIcon(relativePath)
     if relativePath == nil or relativePath == '' then
@@ -414,7 +452,8 @@ function M.getCustomIcon(relativePath)
 
     local key = 'custom_' .. relativePath;
     return getOrCreate(key, function()
-        local fullPath = string.format('%s/assets/hotbar/custom/%s', addon.path, relativePath);
+        local fullPath = M.ResolveCustomIconPath(relativePath);
+        if not fullPath then return nil; end
         return loadTextureFromFile(fullPath);
     end, 'custom_icons');
 end
@@ -473,12 +512,13 @@ function M.clearCategory(category)
     if entries then
         for _, entry in ipairs(entries) do
             texturesByKey[entry.key] = nil;
+            deferRelease(entry);
         end
         categoryEntries[category] = {};
     end
-
-    -- Force garbage collection to release D3D resources
-    collectgarbage('collect');
+    -- COM Release is intentionally deferred until FlushPendingReleases runs
+    -- at the top of the next d3d_present. Calling collectgarbage here would
+    -- free a texture pointer that this frame's draw list still references.
 end
 
 -- Clear categories that should be cleared on zone change
@@ -490,8 +530,15 @@ function M.clearOnZone()
     end
 end
 
--- Clear all caches (call on addon unload)
+-- Clear all caches (called on profile switch and addon unload)
 function M.clear()
+    -- Defer the actual COM release so this frame's draw list can finish.
+    for _, entries in pairs(categoryEntries) do
+        for _, entry in ipairs(entries) do
+            deferRelease(entry);
+        end
+    end
+
     -- Clear all tables
     texturesByKey = {};
     for category, _ in pairs(categoryEntries) do
@@ -512,9 +559,20 @@ function M.clear()
             assets = { hits = 0, misses = 0, evictions = 0 },
         },
     };
+    -- COM Release runs naturally on Lua GC after FlushPendingReleases drops
+    -- the deferred references at the top of the next d3d_present.
+end
 
-    -- Force garbage collection
-    collectgarbage('collect');
+-- Drop the Lua references to entries evicted/cleared during the previous
+-- frame. Call once per frame from the TOP of d3d_present — by that point
+-- the previous frame's ImGui draws have already executed, so any texture
+-- pointer they queued is safe to invalidate. After this returns, Lua's
+-- GC can run d3d8.gc_safe_release whenever it chooses without racing the
+-- renderer.
+function M.FlushPendingReleases()
+    if #pendingReleases > 0 then
+        pendingReleases = {};
+    end
 end
 
 -- ============================================

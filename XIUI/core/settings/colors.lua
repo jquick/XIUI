@@ -68,7 +68,7 @@ function M.createColorCustomizationDefaults()
             percentTextColor = 0xFFFFFFFF,
             backgroundColor = 0x66000000,        -- Semi-transparent black - Alpha is the first byte: 0.4 * 255 = 102 = 0x66
             targetBackgroundColor = 0x66000000,  -- Target container background (defaults to same as entry background)
-            borderColor = 0x00000000,            -- transparent black - default border
+            borderColor = 0xFF000000,            -- opaque black - default border (visible when 'Use Name Color' is off)
             targetBorderColor = 0xFFFFFFFF,      -- white - border for main target
             subtargetBorderColor = 0xFF8080FF,   -- blue - border for subtarget
             targetNameTextColor = 0xFFFFAA00,    -- orange - enemy's target name

@@ -17,6 +17,7 @@ local ashita_settings = require('settings');
 local castcostShared = require('modules.castcost.shared');
 local defaultPositions = require('libs.defaultpositions');
 local imtext = require('libs.imtext');
+local gameState = require('core.gamestate');
 
 local data = require('modules.partylist.data');
 
@@ -36,7 +37,13 @@ end
 -- DrawMember - Render a single party member
 -- ============================================
 function display.DrawMember(memIdx, settings, isLastVisibleMember)
-    local textDrawList = imgui.GetWindowDrawList();
+    local textDrawList = GetUIDrawList();
+    -- Bar borders draw outside the requested barHeight; shift text below to clear them.
+    local barBorderExtent;
+    do
+        local t = gConfig.barBorderThickness or 1;
+        barBorderExtent = (t > 0) and (t / 2 + 0.5) or 0;
+    end
     local memInfo = data.GetMemberInformation(memIdx);
     if (memInfo == nil) then
         memInfo = {
@@ -186,7 +193,7 @@ function display.DrawMember(memIdx, settings, isLastVisibleMember)
 
     -- Draw selection box
     if memInfo.targeted then
-        local drawList = imgui.GetBackgroundDrawList();
+        local drawList = textDrawList;
 
         local selectionWidth = allBarsLengths + settings.cursorPaddingX1 + settings.cursorPaddingX2;
         local selectionScaleY = cache.selectionBoxScaleY or 1;
@@ -297,9 +304,8 @@ function display.DrawMember(memIdx, settings, isLastVisibleMember)
         if (jobIcon ~= nil) then
             namePosX = namePosX + jobIconSize + settings.nameTextOffsetX;
             distanceBaseX = distanceBaseX + jobIconSize; -- Only add job icon width, not name offset
-            -- Use background draw list to render outside window clipping
             local jobIconPtr = tonumber(ffi.cast("uint32_t", jobIcon));
-            local draw_list = imgui.GetBackgroundDrawList();
+            local draw_list = textDrawList;
             draw_list:AddImage(
                 jobIconPtr,
                 {hpStartX, offsetStartY},
@@ -479,24 +485,24 @@ function display.DrawMember(memIdx, settings, isLastVisibleMember)
         local zoneBarWidth = allBarsLengths;
         local zoneBarHeight;
         if layout == 1 then
-            zoneBarHeight = hpBarHeight + 1 + mpBarHeight;
+            zoneBarHeight = hpBarHeight + 1 + mpBarHeight + barBorderExtent;
         else
-            zoneBarHeight = hpBarHeight;
+            zoneBarHeight = hpBarHeight + barBorderExtent;
         end
         imgui.Dummy({zoneBarWidth, zoneBarHeight});
     else
         local zoneBarWidth = allBarsLengths;
         local zoneBarHeight;
         if layout == 1 then
-            zoneBarHeight = hpBarHeight + 1 + mpBarHeight;
+            zoneBarHeight = hpBarHeight + 1 + mpBarHeight + barBorderExtent;
         else
-            zoneBarHeight = hpBarHeight;
+            zoneBarHeight = hpBarHeight + barBorderExtent;
         end
 
         local zoneBarStartX, zoneBarStartY = imgui.GetCursorScreenPos();
         imgui.Dummy({zoneBarWidth, zoneBarHeight});
 
-        local drawList = imgui.GetWindowDrawList();
+        local drawList = textDrawList;
         drawList:AddRect(
             {zoneBarStartX, zoneBarStartY},
             {zoneBarStartX + zoneBarWidth, zoneBarStartY + zoneBarHeight},
@@ -520,7 +526,7 @@ function display.DrawMember(memIdx, settings, isLastVisibleMember)
         hpTextY = hpStartY - nameRefHeight - settings.nameTextOffsetY + hpBaselineOffset + textOffsets.hpY;
     else
         hpTextX = hpStartX + hpBarWidth - hpTextWidth + settings.hpTextOffsetX + textOffsets.hpX;
-        hpTextY = hpStartY + hpBarHeight + settings.hpTextOffsetY + hpBaselineOffset + textOffsets.hpY;
+        hpTextY = hpStartY + hpBarHeight + barBorderExtent + settings.hpTextOffsetY + hpBaselineOffset + textOffsets.hpY;
     end
     if memInfo.inzone then
         imtext.Draw(textDrawList, hpDisplayText, hpTextX, hpTextY, hpColor, fontSizes.hp);
@@ -595,7 +601,7 @@ function display.DrawMember(memIdx, settings, isLastVisibleMember)
                 local spellNameWidth, _ = imtext.Measure(castData.spellName, fontSizes.name);
 
                 local castBarWidth = hpBarWidth * 0.6 * cache.castBarScaleX;
-                local castBarHeight = math.max(6, nameRefHeight * 0.8 * cache.castBarScaleY);
+                local castBarHeight = math.max(2, nameRefHeight * 0.8 * cache.castBarScaleY);
                 local castBarOffsetX = cache.castBarOffsetX or 0;
                 local castBarOffsetY = cache.castBarOffsetY or 0;
                 local castBarX;
@@ -605,10 +611,11 @@ function display.DrawMember(memIdx, settings, isLastVisibleMember)
                     castBarX = namePosX + castBarOffsetX;
                     castBarOffsetY = castBarOffsetY - 10;
                 else
-                    -- Anchor cast bar to end of the spell name
-                    castBarX = namePosX + spellNameWidth + 4 + castBarOffsetX;
+                    -- Anchor cast bar to end of the spell name (where it's actually
+                    -- rendered: namePosX + textOffsets.nameX, not namePosX alone).
+                    castBarX = nameTextX + spellNameWidth + 4 + castBarOffsetX;
                 end
-                local castBarY = hpStartY - nameRefHeight - settings.nameTextOffsetY + (nameRefHeight - castBarHeight) / 2 + castBarOffsetY;
+                local castBarY = hpStartY - nameRefHeight - settings.nameTextOffsetY + textOffsets.nameY + (nameRefHeight - castBarHeight) / 2 + castBarOffsetY;
                 local castGradient = GetCustomGradient(cache.colors, 'castBarGradient') or {'#ffaa00', '#ffcc44'};
                 progressbar.ProgressBar(
                     {{castProgress, castGradient}},
@@ -711,49 +718,55 @@ function display.DrawMember(memIdx, settings, isLastVisibleMember)
             imgui.Dummy({0, 1});
             local rowStartX, rowStartY = imgui.GetCursorScreenPos();
 
-            -- TP text (or spell name if casting with 'tp' style)
-            if showingCastInTpSlot then
-                -- Show spell name instead of TP when casting with 'tp' style
-                local castTextColor = cache.colors.castTextColor or 0xFFFFCC44;
-                tpText = castData.spellName;
-                tpColor = castTextColor;
-            else
-                -- Normal TP text color with optional flashing
-                local desiredTpColor;
-                if memInfo.tp >= 1000 and cache.flashTP then
-                    local flashTime = os.clock();
-                    local timePerPulse = 1;
-                    local phase = flashTime % timePerPulse;
-                    local pulseAlpha = (2 / timePerPulse) * phase;
-                    if pulseAlpha > 1 then pulseAlpha = 2 - pulseAlpha; end
-                    local baseColor = cache.colors.tpFullTextColor or 0xFFFFFFFF;
-                    local flashColor = cache.colors.tpFlashColor or 0xFF3ECE00;
-                    local baseA = bit.band(bit.rshift(baseColor, 24), 0xFF);
-                    local baseR = bit.band(bit.rshift(baseColor, 16), 0xFF);
-                    local baseG = bit.band(bit.rshift(baseColor, 8), 0xFF);
-                    local baseB = bit.band(baseColor, 0xFF);
-                    local flashA = bit.band(bit.rshift(flashColor, 24), 0xFF);
-                    local flashR = bit.band(bit.rshift(flashColor, 16), 0xFF);
-                    local flashG = bit.band(bit.rshift(flashColor, 8), 0xFF);
-                    local flashB = bit.band(flashColor, 0xFF);
-                    local interpA = math.floor(baseA + (flashA - baseA) * pulseAlpha);
-                    local interpR = math.floor(baseR + (flashR - baseR) * pulseAlpha);
-                    local interpG = math.floor(baseG + (flashG - baseG) * pulseAlpha);
-                    local interpB = math.floor(baseB + (flashB - baseB) * pulseAlpha);
-                    desiredTpColor = bit.bor(bit.lshift(interpA, 24), bit.lshift(interpR, 16), bit.lshift(interpG, 8), interpB);
-                    tpColor = desiredTpColor;
+            -- TP text (or spell name if casting with 'tp' style). Hidden when
+            -- showTP is off and we're not displaying a cast in the TP slot;
+            -- in that case the MP bar shifts left to reclaim the space.
+            local renderTpSlot = (showTP or showingCastInTpSlot);
+            if renderTpSlot then
+                if showingCastInTpSlot then
+                    -- Show spell name instead of TP when casting with 'tp' style
+                    local castTextColor = cache.colors.castTextColor or 0xFFFFCC44;
+                    tpText = castData.spellName;
+                    tpColor = castTextColor;
                 else
-                    desiredTpColor = (memInfo.tp >= 1000) and cache.colors.tpFullTextColor or cache.colors.tpEmptyTextColor;
-                    tpColor = desiredTpColor;
+                    -- Normal TP text color with optional flashing
+                    local desiredTpColor;
+                    if memInfo.tp >= 1000 and cache.flashTP then
+                        local flashTime = os.clock();
+                        local timePerPulse = 1;
+                        local phase = flashTime % timePerPulse;
+                        local pulseAlpha = (2 / timePerPulse) * phase;
+                        if pulseAlpha > 1 then pulseAlpha = 2 - pulseAlpha; end
+                        local baseColor = cache.colors.tpFullTextColor or 0xFFFFFFFF;
+                        local flashColor = cache.colors.tpFlashColor or 0xFF3ECE00;
+                        local baseA = bit.band(bit.rshift(baseColor, 24), 0xFF);
+                        local baseR = bit.band(bit.rshift(baseColor, 16), 0xFF);
+                        local baseG = bit.band(bit.rshift(baseColor, 8), 0xFF);
+                        local baseB = bit.band(baseColor, 0xFF);
+                        local flashA = bit.band(bit.rshift(flashColor, 24), 0xFF);
+                        local flashR = bit.band(bit.rshift(flashColor, 16), 0xFF);
+                        local flashG = bit.band(bit.rshift(flashColor, 8), 0xFF);
+                        local flashB = bit.band(flashColor, 0xFF);
+                        local interpA = math.floor(baseA + (flashA - baseA) * pulseAlpha);
+                        local interpR = math.floor(baseR + (flashR - baseR) * pulseAlpha);
+                        local interpG = math.floor(baseG + (flashG - baseG) * pulseAlpha);
+                        local interpB = math.floor(baseB + (flashB - baseB) * pulseAlpha);
+                        desiredTpColor = bit.bor(bit.lshift(interpA, 24), bit.lshift(interpR, 16), bit.lshift(interpG, 8), interpB);
+                        tpColor = desiredTpColor;
+                    else
+                        desiredTpColor = (memInfo.tp >= 1000) and cache.colors.tpFullTextColor or cache.colors.tpEmptyTextColor;
+                        tpColor = desiredTpColor;
+                    end
                 end
+
+                local tpBaselineOffset = tpRefHeight - tpHeight;
+                local tpTextX = rowStartX + 4 + textOffsets.tpX;
+                local tpTextY = rowStartY + tpBaselineOffset + textOffsets.tpY;
+                imtext.Draw(textDrawList, tpText, tpTextX, tpTextY, tpColor, fontSizes.tp);
             end
 
-            local tpBaselineOffset = tpRefHeight - tpHeight;
-            local tpTextX = rowStartX + 4 + textOffsets.tpX;
-            local tpTextY = rowStartY + tpBaselineOffset + textOffsets.tpY;
-            imtext.Draw(textDrawList, tpText, tpTextX, tpTextY, tpColor, fontSizes.tp);
-
-            local mpBarStartX = rowStartX + 4 + maxTpTextWidth + 4;
+            local effectiveTpTextWidth = renderTpSlot and maxTpTextWidth or 0;
+            local mpBarStartX = rowStartX + 4 + effectiveTpTextWidth + 4;
             mpStartX = mpBarStartX;
             mpStartY = rowStartY;
             imgui.SetCursorScreenPos({mpStartX, mpStartY});
@@ -906,7 +919,7 @@ function display.DrawMember(memIdx, settings, isLastVisibleMember)
                 local currentMpTextWidth = showingCastInMpSlot and imtext.Measure(mpDisplayText, fontSizes.mp) or mpTextWidth;
                 local mpBaselineOffset = mpRefHeight - mpHeight;
                 local mpTextX = mpStartX + mpBarWidth - currentMpTextWidth + textOffsets.mpX;
-                local mpTextY = mpStartY + mpBarHeight + settings.mpTextOffsetY + mpBaselineOffset + textOffsets.mpY;
+                local mpTextY = mpStartY + mpBarHeight + barBorderExtent + settings.mpTextOffsetY + mpBaselineOffset + textOffsets.mpY;
                 if memInfo.inzone then
                     imtext.Draw(textDrawList, mpDisplayText, mpTextX, mpTextY, mpColor, fontSizes.mp);
                 end
@@ -956,7 +969,7 @@ function display.DrawMember(memIdx, settings, isLastVisibleMember)
                 local currentTpTextWidth = showingCastInTpSlot and imtext.Measure(tpText, fontSizes.tp) or tpTextWidth;
                 local tpBaselineOffset = tpRefHeight - tpHeight;
                 local tpTextX = tpStartX + tpBarWidth - currentTpTextWidth + textOffsets.tpX;
-                local tpTextY = tpStartY + tpBarHeight + settings.tpTextOffsetY + tpBaselineOffset + textOffsets.tpY;
+                local tpTextY = tpStartY + tpBarHeight + barBorderExtent + settings.tpTextOffsetY + tpBaselineOffset + textOffsets.tpY;
                 if memInfo.inzone then
                     imtext.Draw(textDrawList, tpText, tpTextX, tpTextY, tpColor, fontSizes.tp);
                 end
@@ -1142,8 +1155,6 @@ function display.DrawPartyWindow(settings, party, partyIndex)
         return;
     end
 
-    local backgroundPrim = data.partyWindowPrim[partyIndex].background;
-
     local titleUV;
     if (partyIndex == 1) then
         titleUV = partyMemberCount == 1 and data.titleUVs.solo or data.titleUVs.party;
@@ -1171,11 +1182,32 @@ function display.DrawPartyWindow(settings, party, partyIndex)
     imgui.PushStyleVar(ImGuiStyleVar_FramePadding, {0,0});
     imgui.PushStyleVar(ImGuiStyleVar_ItemSpacing, { settings.barSpacing * scale.x, 0 });
     
-    ApplyWindowPosition(windowName);
+    local positionJustApplied = ApplyWindowPosition(windowName);
     
     if (imgui.Begin(windowName, true, windowFlags)) then
         SaveWindowPosition(windowName);
         imguiPosX, imguiPosY = imgui.GetWindowPos();
+
+        -- Draw background + borders FIRST so they sit beneath member content on the draw list.
+        -- Window size depends on content rendered later, so we use the previous frame's cached
+        -- size from data.fullMenuWidth/Height. The cache is updated at the end of this function.
+        local cachedW = data.fullMenuWidth[partyIndex];
+        local cachedH = data.fullMenuHeight[partyIndex];
+        if cachedW and cachedH and cachedW > 0 and cachedH > 0 then
+            windowBg.Draw(GetUIDrawList(), imguiPosX, imguiPosY, cachedW, cachedH, {
+                theme = cache.backgroundName,
+                padding = settings.bgPadding,
+                paddingY = settings.bgPaddingY,
+                bgScale = cache.bgScale,
+                borderScale = cache.borderScale,
+                bgOpacity = cache.backgroundOpacity,
+                bgColor = cache.colors.bgColor,
+                borderSize = settings.borderSize,
+                bgOffset = settings.bgOffset,
+                borderOpacity = cache.borderOpacity,
+                borderColor = cache.colors.borderColor,
+            });
+        end
 
         local nameRefHeight = cache.fontSizes.name;
         local offsetSize = nameRefHeight > iconSize and nameRefHeight or iconSize;
@@ -1189,7 +1221,7 @@ function display.DrawPartyWindow(settings, party, partyIndex)
         local lastVisibleMemberIdx = firstPlayerIndex;
         for i = firstPlayerIndex, lastPlayerIndex do
             local relIndex = i - firstPlayerIndex
-            if ((partyIndex == 1 and shouldExpandHeight) or relIndex < partyMemberCount or relIndex < settings.minRows) then
+            if ((partyIndex == 1 and shouldExpandHeight) or relIndex < partyMemberCount or relIndex < cache.minRows) then
                 lastVisibleMemberIdx = i;
             end
         end
@@ -1198,7 +1230,7 @@ function display.DrawPartyWindow(settings, party, partyIndex)
 
         for i = firstPlayerIndex, lastPlayerIndex do
             local relIndex = i - firstPlayerIndex
-            if ((partyIndex == 1 and shouldExpandHeight) or relIndex < partyMemberCount or relIndex < settings.minRows) then
+            if ((partyIndex == 1 and shouldExpandHeight) or relIndex < partyMemberCount or relIndex < cache.minRows) then
                 display.DrawMember(i, settings, i == lastVisibleMemberIdx);
             else
             end
@@ -1236,22 +1268,6 @@ function display.DrawPartyWindow(settings, party, partyIndex)
     -- Calculate background dimensions (needed for title positioning)
     local bgWidth = data.fullMenuWidth[partyIndex] + (settings.bgPadding * 2);
 
-    -- Update background and borders using windowbackground library
-    local bgOptions = {
-        theme = cache.backgroundName,
-        padding = settings.bgPadding,
-        paddingY = settings.bgPaddingY,
-        bgScale = cache.bgScale,
-        borderScale = cache.borderScale,
-        bgOpacity = cache.backgroundOpacity,
-        bgColor = cache.colors.bgColor,
-        borderSize = settings.borderSize,
-        bgOffset = settings.bgOffset,
-        borderOpacity = cache.borderOpacity,
-        borderColor = cache.colors.borderColor,
-    };
-    windowBg.update(backgroundPrim, imguiPosX, imguiPosY, data.fullMenuWidth[partyIndex], data.fullMenuHeight[partyIndex], bgOptions);
-
     -- Draw title (skip foreground rendering when modal is open to respect dim overlay)
     if (cache.showTitle and data.partyTitlesTexture ~= nil and not _XIUI_MODAL_OPEN) then
         local titleImage = tonumber(ffi.cast("uint32_t", data.partyTitlesTexture.image));
@@ -1269,28 +1285,6 @@ function display.DrawPartyWindow(settings, party, partyIndex)
             {titleUV[1], titleUV[2]}, {titleUV[3], titleUV[4]},
             IM_COL32_WHITE
         );
-    end
-
-    -- Save position if moved (with change detection to avoid spam) - all party windows
-    local winPosX, winPosY = imgui.GetWindowPos();
-    if not gConfig.lockPositions then
-        if lastSavedPosX[partyIndex] == nil or
-           math.abs(winPosX - lastSavedPosX[partyIndex]) > 1 or
-           math.abs(winPosY - lastSavedPosY[partyIndex]) > 1 then
-            if partyIndex == 1 then
-                gConfig.partyListWindowPosX = winPosX;
-                gConfig.partyListWindowPosY = winPosY;
-            elseif partyIndex == 2 then
-                gConfig.partyList2WindowPosX = winPosX;
-                gConfig.partyList2WindowPosY = winPosY;
-            else
-                gConfig.partyList3WindowPosX = winPosX;
-                gConfig.partyList3WindowPosY = winPosY;
-            end
-            lastSavedPosX[partyIndex] = winPosX;
-            lastSavedPosY[partyIndex] = winPosY;
-            -- Position will be persisted on addon unload
-        end
     end
 
     imgui.End();
@@ -1311,25 +1305,37 @@ function display.DrawPartyWindow(settings, party, partyIndex)
 
         local partyListState = gConfig.partyListState[partyIndex];
 
-        if (partyListState ~= nil) then
-            if (menuHeight ~= partyListState.height) then
-                local newPosY = partyListState.y + partyListState.height - menuHeight;
-                imguiPosY = newPosY;
-                imgui.SetWindowPos(windowName, { imguiPosX, imguiPosY });
-            end
-        end
+        -- Detect external position change (forced reset, user drag, etc.)
+        -- Note: We don't use positionJustApplied here because partyListState is persisted
+        -- in the profile and should be preserved on normal login (when positions are applied
+        -- from saved data). RecoverAllPositions explicitly clears partyListState for resets.
+        local positionChanged = partyListState ~= nil and partyListState.y ~= nil and partyListState.y ~= imguiPosY;
 
-        if (partyListState == nil or
-                imguiPosX ~= partyListState.x or imguiPosY ~= partyListState.y or
-                menuWidth ~= partyListState.width or menuHeight ~= partyListState.height) then
-            gConfig.partyListState[partyIndex] = {
-                x = imguiPosX,
-                y = imguiPosY,
-                width = menuWidth,
-                height = menuHeight,
-            };
-            data.lastSettingsSaveTime = os.clock();
-            data.pendingSettingsSave = true;
+        if positionChanged then
+            -- Position was externally moved; clear tracking so height adjustment
+            -- doesn't fire until state is re-established on the next frame
+            gConfig.partyListState[partyIndex] = nil;
+        else
+            if (partyListState ~= nil) then
+                if (menuHeight ~= partyListState.height) then
+                    local newPosY = partyListState.y + partyListState.height - menuHeight;
+                    imguiPosY = newPosY;
+                    imgui.SetWindowPos(windowName, { imguiPosX, imguiPosY });
+                end
+            end
+
+            if (partyListState == nil or
+                    imguiPosX ~= partyListState.x or imguiPosY ~= partyListState.y or
+                    menuWidth ~= partyListState.width or menuHeight ~= partyListState.height) then
+                gConfig.partyListState[partyIndex] = {
+                    x = imguiPosX,
+                    y = imguiPosY,
+                    width = menuWidth,
+                    height = menuHeight,
+                };
+                data.lastSettingsSaveTime = os.clock();
+                data.pendingSettingsSave = true;
+            end
         end
     end
 end
@@ -1408,8 +1414,17 @@ function display.DrawWindow(settings)
     -- Main party window
     display.DrawPartyWindow(settings, party, 1);
 
+    local hideAllianceOnMenu = gameState.ShouldHideModuleOnMenuFocus(
+        gConfig,
+        'partyListHideOnMenuFocus',
+        'partyListHideMacroPalette'
+    ) and gConfig.partyListHideOnlyAllianceOnMenuFocus;
+
     -- Alliance party windows
-    if (gConfig.partyListAlliance) then
+    if hideAllianceOnMenu then
+        data.UpdateTextVisibility(false, 2);
+        data.UpdateTextVisibility(false, 3);
+    elseif (gConfig.partyListAlliance) then
         display.DrawPartyWindow(settings, party, 2);
         display.DrawPartyWindow(settings, party, 3);
     else
@@ -1419,9 +1434,20 @@ function display.DrawWindow(settings)
 end
 
 display.ResetPositions = function()
+    local positionGetters = {
+        defaultPositions.GetPartyListPosition,
+        defaultPositions.GetPartyList2Position,
+        defaultPositions.GetPartyList3Position,
+    };
+    local windowNames = { 'PartyList', 'PartyList2', 'PartyList3' };
     for i = 1, 3 do
-        forcePositionReset[i] = true;
-        hasAppliedSavedPosition[i] = false;
+        local defX, defY = positionGetters[i]();
+        if gConfig.windowPositions then
+            gConfig.windowPositions[windowNames[i]] = { x = defX, y = defY };
+        end
+        if gConfig.appliedPositions then
+            gConfig.appliedPositions[windowNames[i]] = nil;
+        end
     end
 end
 

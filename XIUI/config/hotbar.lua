@@ -1502,6 +1502,71 @@ function M.IsCapturingKeybind()
 end
 
 -- Helper: Draw visual settings (shared between global and per-bar when not using global)
+
+local POSITION_MODE_LABELS = { 'Absolute', 'Anchored' };
+local ANCHORED_CHECKBOX_COLUMN_WIDTH = 200;
+
+local function DrawAnchoredBarCheckbox(barSettings, barIndex, configKey)
+    if not barSettings then
+        return;
+    end
+
+    local isEnabled = barSettings.enabled ~= false;
+    if not isEnabled then
+        barSettings.anchoredInStack = false;
+        imgui.BeginDisabled();
+    end
+
+    components.DrawPartyCheckbox(
+        barSettings,
+        'Hotbar ' .. barIndex .. '##' .. configKey .. 'anchored',
+        'anchoredInStack',
+        DeferredUpdateVisuals
+    );
+
+    if not isEnabled then
+        imgui.EndDisabled();
+    end
+end
+
+local function DrawHotbarPositionSettings(configKey)
+    if configKey ~= 'hotbarGlobal' then
+        return;
+    end
+
+    local globalSettings = gConfig.hotbarGlobal;
+    local currentPositionMode = (globalSettings.positionMode == 'anchored') and 'Anchored' or 'Absolute';
+    components.DrawComboBox('Position Mode##hotbarPosition', currentPositionMode, POSITION_MODE_LABELS, function(newValue)
+        globalSettings.positionMode = (newValue == 'Anchored') and 'anchored' or 'absolute';
+        SaveSettingsOnly();
+        DeferredUpdateVisuals();
+    end);
+    imgui.ShowHelp('Absolute: each hotbar moves independently.\nAnchored: selected hotbars stack bottom-up as one group.');
+
+    if globalSettings.positionMode ~= 'anchored' then
+        return;
+    end
+
+    imgui.Spacing();
+    imgui.TextColored({0.75, 0.75, 0.75, 1.0}, 'Bars to anchor (stacked bottom-up):');
+
+    local columnStartX = imgui.GetCursorPosX();
+    for row = 1, 3 do
+        imgui.SetCursorPosX(columnStartX);
+        DrawAnchoredBarCheckbox(gConfig['hotbarBar' .. row], row, 'hotbarBar' .. row);
+
+        imgui.SameLine();
+        imgui.SetCursorPosX(columnStartX + ANCHORED_CHECKBOX_COLUMN_WIDTH);
+        local rightBar = row + 3;
+        DrawAnchoredBarCheckbox(gConfig['hotbarBar' .. rightBar], rightBar, 'hotbarBar' .. rightBar);
+    end
+
+    imgui.Spacing();
+    components.DrawPartySliderInt(globalSettings, 'Hotbar Spacing##' .. configKey, 'hotbarSpacing', 0, 32, '%d', DeferredUpdateVisuals, 0);
+    imgui.ShowHelp('Vertical gap between hotbars when anchored.');
+    imgui.Spacing();
+end
+
 local function DrawVisualSettingsContent(settings, configKey)
     if components.CollapsingSection('Background##' .. configKey, false) then
         local bgThemes = {'-None-', 'Plain', 'Window1', 'Window2', 'Window3', 'Window4', 'Window5', 'Window6', 'Window7', 'Window8'};
@@ -1519,17 +1584,28 @@ local function DrawVisualSettingsContent(settings, configKey)
 
         components.DrawPartySlider(settings, 'Border Opacity##' .. configKey, 'borderOpacity', 0.0, 1.0, '%.2f');
         imgui.ShowHelp('Opacity of the window borders (Window themes only).');
+
+        components.DrawPartySliderInt(settings, 'Background Padding X##' .. configKey, 'backgroundPaddingX', 0, 32, '%d', nil, 0);
+        imgui.ShowHelp('Horizontal space between the window background and the slot grid.');
+
+        components.DrawPartySliderInt(settings, 'Background Padding Y##' .. configKey, 'backgroundPaddingY', 0, 32, '%d', nil, 0);
+        imgui.ShowHelp('Vertical space between the window background and the slot grid. In Anchored mode, padding applies only to the outer top and bottom of the stacked group.');
     end
 
     if components.CollapsingSection('Slot Settings##' .. configKey, false) then
+        DrawHotbarPositionSettings(configKey);
+
         components.DrawPartySliderInt(settings, 'Slot Size (px)##' .. configKey, 'slotSize', 16, 64, '%d', nil, 48);
         imgui.ShowHelp('Size of each slot in pixels.');
 
         components.DrawPartySliderInt(settings, 'Slot X Padding##' .. configKey, 'slotXPadding', 0, 32, '%d', nil, 8);
         imgui.ShowHelp('Horizontal gap between slots.');
 
-        components.DrawPartySliderInt(settings, 'Slot Y Padding##' .. configKey, 'slotYPadding', 0, 32, '%d', nil, 6);
-        imgui.ShowHelp('Vertical gap between rows.');
+        -- Slot Y Padding slider removed: each hotbar is now positioned
+        -- independently, so bar-to-bar spacing is handled by drag-positioning.
+        -- The setting still exists on the data side and controls the row gap
+        -- inside multi-row bars; we keep the saved value but hide the slider
+        -- to avoid misleading users.
 
         -- Show Hotbar Number with inline offsets
         components.DrawPartyCheckbox(settings, 'Show Hotbar Number##' .. configKey, 'showHotbarNumber');
@@ -1568,6 +1644,10 @@ local function DrawVisualSettingsContent(settings, configKey)
             components.DrawInlineOffsets(settings, configKey .. 'qty', 'quantityOffsetX', 'quantityOffsetY', 35);
         end
         imgui.ShowHelp('Display item quantity on item slots. Choose anchor position and fine-tune with X/Y offsets.');
+
+        -- Show full-stack count above the item quantity (only counts complete stacks)
+        components.DrawPartyCheckbox(settings, 'Show Stack Quantity##' .. configKey, 'showStackQuantity');
+        imgui.ShowHelp('Show full-stack count next to the item quantity. Only complete stacks are counted (e.g. 25 of stack-12 items shows "(2)"). Shares position/font with Show Item Quantity.');
 
         -- Show Action Labels with offsets
         components.DrawPartyCheckbox(settings, 'Show Action Labels##' .. configKey, 'showActionLabels');
@@ -1699,6 +1779,9 @@ local function DrawBarVisualSettings(configKey, barLabel)
 
     -- Enabled checkbox at top
     components.DrawPartyCheckbox(barSettings, 'Enabled##' .. configKey, 'enabled');
+    if barSettings.enabled == false then
+        barSettings.anchoredInStack = false;
+    end
     imgui.ShowHelp('Enable or disable this hotbar.');
 
     -- Use Global Settings checkbox
@@ -2251,6 +2334,10 @@ local function DrawCrossbarSettings(selectedCrossbarTab)
                 end
                 imgui.ShowHelp('Display item quantity on item slots. X/Y offsets adjust position.');
 
+                -- Show full-stack count above the item quantity (only counts complete stacks)
+                components.DrawPartyCheckbox(crossbarSettings, 'Show Stack Quantity##crossbar', 'showStackQuantity');
+                imgui.ShowHelp('Show full-stack count next to the item quantity. Only complete stacks are counted (e.g. 25 of stack-12 items shows "(2)"). Shares position/font with Show Item Quantity.');
+
                 -- Show Combo Text with X/Y offsets
                 components.DrawPartyCheckbox(crossbarSettings, 'Show Combo Text##crossbar', 'showComboText');
                 if crossbarSettings.showComboText then
@@ -2526,8 +2613,7 @@ function M.DrawSettings(state)
         DeferredUpdateVisuals();
     end);
     imgui.ShowHelp('When enabled, prevents dragging/dropping and swapping of hotbar and crossbar slots.');
-    components.DrawCheckbox('Hide When Menu Open', 'hotbarHideOnMenuFocus');
-    imgui.ShowHelp('Hide hotbars when a game menu is open (equipment, map, etc.).');
+    components.DrawHideWhenMenuOpenOptions('hotbarHideOnMenuFocus', 'hotbarHideMacroPalette');
 
     -- Disable XI macros checkbox (stored in hotbarGlobal)
     local disableMacroBars = { gConfig.hotbarGlobal.disableMacroBars or false };

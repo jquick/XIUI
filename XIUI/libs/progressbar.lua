@@ -16,7 +16,11 @@ local progressbar = {
 	backgroundRounding = 0,
 
 	-- Foreground
-	foregroundRounding = 3,
+	-- Rounding stays at 0 so the bookended fill's inner corners meet the
+	-- bookends' flat inner edges flush. A non-zero radius here would carve a
+	-- triangular notch out of the bar at each bookend boundary, visible as a
+	-- choppy edge once foregroundPadding stopped masking it.
+	foregroundRounding = 0,
 	foregroundPadding = 5,
 
 	-- Gradient texture cache (hash table for O(1) lookup)
@@ -361,8 +365,9 @@ progressbar.ProgressBar  = function(percentList, dimensions, options)
 		options.decorate = false;
 	end
 
-	-- Get custom draw list if provided, otherwise use window draw list
-	local drawList = options.drawList or imgui.GetWindowDrawList();
+	-- Get draw list (defaults to GetUIDrawList() so bars share the same list
+	-- as window backgrounds and text; pass options.drawList to override).
+	local drawList = options.drawList or GetUIDrawList();
 
 	-- Get position from options or cursor
 	local positionStartX, positionStartY;
@@ -419,14 +424,15 @@ progressbar.ProgressBar  = function(percentList, dimensions, options)
 	rounding = options.decorate and progressbar.backgroundRounding or gConfig.noBookendRounding;
 	progressbar.DrawBar({contentPositionStartX, contentPositionStartY}, {contentPositionStartX + contentWidth, contentPositionStartY + height}, bgGradientStart, bgGradientEnd, rounding, nil, drawList);
 	
-	-- Compute the actual progress bar's width and height
-	local paddingHalf = progressbar.foregroundPadding / 2;
-	
-	local progressPositionStartX = contentPositionStartX + paddingHalf;
-	local progressPositionStartY = contentPositionStartY + paddingHalf;
-	
-	local progressTotalWidth = contentWidth - progressbar.foregroundPadding;
-	local progressHeight = height - progressbar.foregroundPadding;
+	-- The fill matches the bg's footprint exactly so the bar's visible edge is
+	-- the bg edge. The Bar Border Thickness slider then draws an outline strictly
+	-- outside that edge — each pixel of thickness adds 1px of wrap, with 0 truly
+	-- meaning no frame.
+	local progressPositionStartX = contentPositionStartX;
+	local progressPositionStartY = contentPositionStartY;
+
+	local progressTotalWidth = contentWidth;
+	local progressHeight = height;
 	
 	-- Draw the progress bar(s)
 	local progressOffset = 0;
@@ -579,10 +585,14 @@ progressbar.ProgressBar  = function(percentList, dimensions, options)
 		);
 	end
 
-	-- Draw default inner background border - always drawn for all bars (unless thickness is 0)
+	-- Draw the outer border wrapping the bar. Skipped at thickness 0.
+	-- innerOffset = thickness/2 + 0.5 places ImGui's centered, anti-aliased
+	-- stroke so its inner AA fringe lands exactly at the bar's outer edge:
+	-- no gap to the bar (which `thickness` produced) and no AA bleed onto the
+	-- fill (which `thickness/2` produced).
 	local innerBorderThickness = gConfig.barBorderThickness or 2;
 	if innerBorderThickness > 0 then
-		local innerOffset = innerBorderThickness / 2;
+		local innerOffset = innerBorderThickness / 2 + 0.5;
 		drawList:AddRect(
 			{positionStartX - innerOffset, positionStartY - innerOffset},
 			{positionStartX + width + innerOffset, positionStartY + height + innerOffset},
@@ -606,7 +616,9 @@ progressbar.ProgressBar  = function(percentList, dimensions, options)
 			local middleOffset = innerOffset + innerBorderThickness;
 			borderExtent = middleOffset + middleBorderThickness / 2;
 		elseif innerBorderThickness > 0 then
-			borderExtent = innerBorderThickness / 2;
+			-- innerOffset is thickness/2 + 0.5 (centered stroke + AA fringe),
+			-- so the total extent past the bar edge is thickness + 1
+			borderExtent = innerBorderThickness + 1;
 		end
 		-- Add border extent to width/height to prevent right/bottom clipping
 		imgui.Dummy({width + borderExtent, height + borderExtent});

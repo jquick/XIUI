@@ -75,20 +75,6 @@ castbar.DrawWindow = function(settings)
 	if ((percent < 1 and percent ~= castbar.previousPercent) or showConfig[1]) then
 		imgui.SetNextWindowSize({settings.barWidth, -1});
 
-		-- Handle position reset or restore
-		if forcePositionReset then
-			local defX, defY = defaultPositions.GetCastBarPosition();
-			imgui.SetNextWindowPos({defX, defY}, ImGuiCond_Always);
-			forcePositionReset = false;
-			hasAppliedSavedPosition = true;
-			lastSavedPosX, lastSavedPosY = defX, defY;
-		elseif not hasAppliedSavedPosition and gConfig.castBarWindowPosX ~= nil then
-			imgui.SetNextWindowPos({gConfig.castBarWindowPosX, gConfig.castBarWindowPosY}, ImGuiCond_Once);
-			hasAppliedSavedPosition = true;
-			lastSavedPosX = gConfig.castBarWindowPosX;
-			lastSavedPosY = gConfig.castBarWindowPosY;
-		end
-
 		local windowFlags = GetBaseWindowFlags(gConfig.lockPositions);
 		ApplyWindowPosition('CastBar');
 		if (imgui.Begin('CastBar', true, windowFlags)) then
@@ -184,8 +170,13 @@ castbar.Cleanup = function()
 end
 
 castbar.ResetPositions = function()
-	forcePositionReset = true;
-	hasAppliedSavedPosition = false;
+	local defX, defY = defaultPositions.GetCastBarPosition();
+	if gConfig.windowPositions then
+		gConfig.windowPositions['CastBar'] = { x = defX, y = defY };
+	end
+	if gConfig.appliedPositions then
+		gConfig.appliedPositions['CastBar'] = nil;
+	end
 end
 
 return castbar;

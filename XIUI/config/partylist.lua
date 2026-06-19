@@ -34,7 +34,8 @@ local function CopyPartySettings(sourcePartyName, targetPartyName)
     end
 
     -- Save and update
-    UpdateSettings();
+    SaveSettingsOnly();
+    DeferredUpdateVisuals();
 end
 
 -- Helper function to draw per-party settings tab content
@@ -96,9 +97,6 @@ local function DrawPartyTabContent(party, partyName)
         components.DrawPartyCheckbox(party, 'Show Bookends', 'showBookends');
         components.DrawPartyCheckbox(party, 'Show Title', 'showTitle');
         components.DrawPartyCheckbox(party, 'Align Bottom', 'alignBottom');
-        components.DrawPartyCheckbox(party, 'Expand Height', 'expandHeight');
-        components.DrawPartyCheckbox(party, 'Expand Height In Alliance', 'expandHeightInAlliance');
-        imgui.ShowHelp('When enabled, Party A will use expanded height only while in an alliance.');
 
         -- HP Display Mode dropdown
         components.DrawDisplayModeDropdown('HP Display##party' .. partyName, party, 'hpDisplayMode',
@@ -113,7 +111,13 @@ local function DrawPartyTabContent(party, partyName)
     end
 
     if components.CollapsingSection('Scale & Spacing##party' .. partyName) then
-        components.DrawPartySlider(party, 'Min Rows', 'minRows', 1, 6);
+        components.DrawPartyCheckbox(party, 'Expand Height In Alliance', 'expandHeightInAlliance');
+        imgui.ShowHelp('When enabled, the party list expands to full height only while in an alliance.');
+        components.DrawPartyCheckbox(party, 'Expand Height', 'expandHeight');
+        imgui.ShowHelp('When enabled, the party list always shows all 6 rows. Overrides Min Rows.');
+        if not party.expandHeight then
+            components.DrawPartySlider(party, 'Min Rows', 'minRows', 1, 6);
+        end
         components.DrawPartySlider(party, 'Entry Spacing', 'entrySpacing', -50, 50);
         components.DrawPartyCheckbox(party, 'Show Selection Box', 'showSelectionBox');
         imgui.ShowHelp('When disabled, only the cursor arrow is shown without the selection box background.');
@@ -248,7 +252,8 @@ local function DrawPartyTabContent(party, partyName)
                     local isSelected = (currentStyleIndex == i);
                     if imgui.Selectable(castBarStyleItems[i] .. '##' .. i, isSelected) then
                         party.castBarStyle = (i == 1) and 'mp' or ((i == 2) and 'tp' or 'name');
-                        UpdateSettings();
+                        SaveSettingsOnly();
+                        DeferredUpdateVisuals();
                     end
                     if isSelected then
                         imgui.SetItemDefaultFocus();
@@ -293,8 +298,11 @@ function M.DrawSettings(state)
     local selectedPartyTab = state.selectedPartyTab or 1;
 
     components.DrawCheckbox('Enabled', 'showPartyList', CheckVisibility);
-    components.DrawCheckbox('Hide When Menu Open', 'partyListHideOnMenuFocus');
-    imgui.ShowHelp('Hide this module when a game menu is open (equipment, map, etc.).');
+    components.DrawHideWhenMenuOpenOptions(
+        'partyListHideOnMenuFocus',
+        'partyListHideMacroPalette',
+        'partyListHideOnlyAllianceOnMenuFocus'
+    );
     components.DrawCheckbox('Preview Full Party (when config open)', 'partyListPreview');
 
     -- Global settings (shared across all parties)
@@ -365,7 +373,8 @@ local function CopyPartyColorSettings(sourcePartyName, targetPartyName)
     end
 
     -- Save and update
-    UpdateSettings();
+    SaveSettingsOnly();
+    DeferredUpdateVisuals();
 end
 
 -- Helper function to draw color settings for a specific party
@@ -417,7 +426,8 @@ local function DrawPartyColorTabContent(colors, partyName)
         local overrideActive = {colors.barBackgroundOverride.active};
         if (imgui.Checkbox("Enable Background Override##" .. partyName, overrideActive)) then
             colors.barBackgroundOverride.active = overrideActive[1];
-            UpdateSettings();
+            SaveSettingsOnly();
+            DeferredUpdateVisuals();
         end
         imgui.ShowHelp("When enabled, uses the colors below instead of the global bar background color");
         if colors.barBackgroundOverride.active then
@@ -429,7 +439,8 @@ local function DrawPartyColorTabContent(colors, partyName)
         local borderOverrideActive = {colors.barBorderOverride.active};
         if (imgui.Checkbox("Enable Border Override##" .. partyName, borderOverrideActive)) then
             colors.barBorderOverride.active = borderOverrideActive[1];
-            UpdateSettings();
+            SaveSettingsOnly();
+            DeferredUpdateVisuals();
         end
         imgui.ShowHelp("When enabled, uses the color below instead of the global bar background color for borders");
         if colors.barBorderOverride.active then

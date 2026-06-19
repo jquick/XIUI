@@ -41,6 +41,9 @@ local CONTAINERS = {
     { id = 16, name = 'Wardrobe 8' },
 };
 
+-- Containers reachable from the field without mog house / special access
+local ACCESSIBLE_CONTAINERS = { 0, 8, 10, 11, 12, 13, 14, 15, 16 };
+
 -- ============================================
 -- Helper Functions
 -- ============================================
@@ -55,6 +58,71 @@ local function IsGarbageSpellName(name)
         return true;
     end
     return false;
+end
+
+---@param item table
+---@param itemId number|nil
+---@param itemName string|nil
+---@param resMgr table|nil
+---@return boolean
+local function ItemSlotMatches(item, itemId, itemName, resMgr)
+    if not item or not item.Id or item.Id <= 0 or item.Id == 65535 then
+        return false;
+    end
+    if itemId and item.Id == itemId then
+        return true;
+    end
+    if itemName and resMgr then
+        local itemRes = resMgr:GetItemById(item.Id);
+        if itemRes and itemRes.Name and itemRes.Name[1] == itemName then
+            return true;
+        end
+    end
+    return false;
+end
+
+--- Scan container IDs for a matching item; optionally sum stack counts
+---@param containerIds number[]
+---@param itemId number|nil
+---@param itemName string|nil
+---@param sumCounts boolean When true, return total count; when false, return 1 if found else 0
+---@return number
+local function ScanContainersForItem(containerIds, itemId, itemName, sumCounts)
+    if not itemId and (not itemName or itemName == '') then
+        return 0;
+    end
+
+    local memMgr = AshitaCore:GetMemoryManager();
+    if not memMgr then return 0; end
+
+    local inventory = memMgr:GetInventory();
+    if not inventory then return 0; end
+
+    local resMgr = AshitaCore:GetResourceManager();
+    local total = 0;
+
+    for _, containerId in ipairs(containerIds) do
+        local maxSlots = inventory:GetContainerCountMax(containerId);
+        if maxSlots and maxSlots > 0 then
+            for slotIndex = 1, maxSlots do
+                local item = inventory:GetContainerItem(containerId, slotIndex);
+                if ItemSlotMatches(item, itemId, itemName, resMgr) then
+                    if sumCounts then
+                        total = total + (item.Count or 1);
+                    else
+                        return 1;
+                    end
+                end
+            end
+        end
+    end
+
+    return total;
+end
+
+local ALL_CONTAINER_IDS = {};
+for _, container in ipairs(CONTAINERS) do
+    ALL_CONTAINER_IDS[#ALL_CONTAINER_IDS + 1] = container.id;
 end
 
 -- ============================================
@@ -132,9 +200,32 @@ function M.GetPlayerSpells()
     return spells;
 end
 
--- Ability Type constants (from IAbility.Type & 7)
--- Type 3: Weapon Skill
-local ABILITY_TYPE_WEAPON_SKILL = 3;
+-- Ability Type constants — IAbility.Type is a plain uint8 enum (NOT a bitfield).
+-- Authoritative source: ai/references/Ashita-v4beta/plugins/sdk/ffxi/enums.h `AbilityType`.
+local ABILITY_TYPE = {
+    General           = 0,
+    JobAbility        = 1,
+    PetCommand        = 2,
+    WeaponSkill       = 3,
+    Trait             = 4,
+    BloodPactRage     = 6,
+    CorsairRoll       = 8,
+    CorsairShot       = 9,
+    BloodPactWard     = 10,
+    DancerSamba       = 11,
+    DancerWaltz       = 12,
+    DancerStep        = 13,
+    DancerFlourish1   = 14,
+    ScholarStratagem  = 15,
+    DancerJig         = 16,
+    DancerFlourish2   = 17,
+    BeastmasterSic    = 18,
+    DancerFlourish3   = 19,
+    MonsterSkill      = 20,
+    RuneEnhancement   = 21,
+    RuneWard          = 22,
+    RuneEffusion      = 23,
+};
 
 -- Pet commands to filter out from ability list (these belong in Pet Command section)
 local PET_COMMAND_NAMES = {
@@ -148,7 +239,6 @@ local PET_COMMAND_NAMES = {
     ['Sic'] = true,
     ['Ready'] = true,
     -- SMN commands
-    ['Assault'] = true,
     ['Avatar\'s Favor'] = true,
     -- DRG commands
     ['Steady Wing'] = true,
@@ -157,6 +247,19 @@ local PET_COMMAND_NAMES = {
     ['Retrieve'] = true,
     ['Activate'] = true,
     ['Deactivate'] = true,
+};
+
+-- FFXI macro-maker subcategory headers ("Sambas", "Waltzes", etc.) are present
+-- as ability entries in the resource manager and HasAbility() returns true for
+-- them, but they aren't executable. Filter them out of the JA dropdown.
+local CATEGORY_PLACEHOLDER_NAMES = {
+    ['Sambas']         = true,
+    ['Waltzes']        = true,
+    ['Steps']          = true,
+    ['Jigs']           = true,
+    ['Flourishes I']   = true,
+    ['Flourishes II']  = true,
+    ['Flourishes III'] = true,
 };
 
 --- Get player's available job abilities (includes both main job and subjob abilities)
@@ -180,11 +283,19 @@ function M.GetPlayerAbilities()
         if player:HasAbility(abilityId) then
             local ability = resMgr:GetAbilityById(abilityId);
             if ability and ability.Name and ability.Name[1] and ability.Name[1] ~= '' then
-                local abilityType = ability.Type and bit.band(ability.Type, 7) or 0;
-
-                -- Filter out weapon skills (Type 3) and pet commands (by name)
+                local abilityType = ability.Type or 0;
                 local abilityName = ability.Name[1];
-                if abilityType ~= ABILITY_TYPE_WEAPON_SKILL and not PET_COMMAND_NAMES[abilityName] then
+
+                -- Exclude: weapon skills (separate dropdown), passive traits (not
+                -- macroable), pet commands (separate section), and subcategory
+                -- header placeholders ("Sambas", "Waltzes", etc.).
+                local isWeaponSkill = abilityType == ABILITY_TYPE.WeaponSkill;
+                local isTrait       = abilityType == ABILITY_TYPE.Trait;
+                if not isWeaponSkill
+                    and not isTrait
+                    and not PET_COMMAND_NAMES[abilityName]
+                    and not CATEGORY_PLACEHOLDER_NAMES[abilityName]
+                then
 
                     if not addedAbilities[abilityId] then
                         local source = 'main';
@@ -234,13 +345,13 @@ function M.GetPlayerWeaponskills()
     local weaponskills = {};
     local addedWeaponskills = {};  -- Track by name to avoid duplicates
 
-    -- Scan HasAbility and filter by Type 3 (weapon skills)
+    -- Scan HasAbility and filter by Type == WeaponSkill (3)
     for abilityId = 1, 1024 do
         if player:HasAbility(abilityId) then
             local ability = resMgr:GetAbilityById(abilityId);
             if ability and ability.Name and ability.Name[1] and ability.Name[1] ~= '' then
-                local abilityType = ability.Type and bit.band(ability.Type, 7) or 0;
-                if abilityType == ABILITY_TYPE_WEAPON_SKILL then
+                local abilityType = ability.Type or 0;
+                if abilityType == ABILITY_TYPE.WeaponSkill then
                     local wsName = ability.Name[1];
                     if not addedWeaponskills[wsName] then
                         table.insert(weaponskills, {
@@ -392,6 +503,26 @@ function M.ClearCache()
     cacheSubJobId = nil;
 end
 
+--- Force rebuild spell cache (call when macro editor dropdown opens)
+function M.ForceRefreshSpells()
+    cachedSpells = M.GetPlayerSpells();
+end
+
+--- Force rebuild ability cache (call when macro editor dropdown opens)
+function M.ForceRefreshAbilities()
+    cachedAbilities = M.GetPlayerAbilities();
+end
+
+--- Force rebuild weaponskill cache (call when macro editor dropdown opens)
+function M.ForceRefreshWeaponskills()
+    cachedWeaponskills = M.GetPlayerWeaponskills();
+end
+
+--- Force rebuild item cache (call when macro editor dropdown opens)
+function M.ForceRefreshItems()
+    cachedItems = M.GetPlayerItems();
+end
+
 --- Get current cache job ID
 ---@return number|nil Current cached job ID
 function M.GetCacheJobId()
@@ -431,8 +562,148 @@ function M.IsWeaponskillInCache(wsName)
     return false;
 end
 
+-- Equipment slot bitmasks for equip availability checks
+local EQUIP_SLOT_MASKS = {
+    main = 0x0001,
+    sub = 0x0002,
+    range = 0x0004,
+    ammo = 0x0008,
+    head = 0x0010,
+    body = 0x0020,
+    hands = 0x0040,
+    legs = 0x0080,
+    feet = 0x0100,
+    neck = 0x0200,
+    waist = 0x0400,
+    ear1 = 0x0800,
+    ear2 = 0x1000,
+    ring1 = 0x2000,
+    ring2 = 0x4000,
+    back = 0x8000,
+};
+
+--- Build a signature of currently equipped combat slots (main/sub/range/ammo)
+--- Used to invalidate availability cache when weapons change
+---@return string
+function M.GetEquipmentSignature()
+    local inventory = AshitaCore:GetMemoryManager():GetInventory();
+    if not inventory then
+        return '0:0:0:0';
+    end
+
+    local parts = {};
+    for slot = 0, 3 do
+        local itemId = 0;
+        local equipped = inventory:GetEquippedItem(slot);
+        if equipped and equipped.Index then
+            local index = bit.band(equipped.Index, 0x00FF);
+            if index > 0 then
+                local container = bit.rshift(bit.band(equipped.Index, 0xFF00), 8);
+                local item = inventory:GetContainerItem(container, index);
+                if item and item.Id and item.Id > 0 and item.Id ~= 65535 then
+                    itemId = item.Id;
+                end
+            end
+        end
+        parts[#parts + 1] = tostring(itemId);
+    end
+
+    return table.concat(parts, ':');
+end
+
+--- Check if the player owns an item anywhere in tracked storage containers
+---@param itemId number|nil
+---@param itemName string|nil
+---@return boolean
+function M.IsItemOwned(itemId, itemName)
+    return ScanContainersForItem(ALL_CONTAINER_IDS, itemId, itemName, false) > 0;
+end
+
+--- Count an item in accessible inventory (inventory + wardrobes)
+---@param itemId number|nil
+---@param itemName string|nil
+---@return number
+function M.CountAccessibleItem(itemId, itemName)
+    return ScanContainersForItem(ACCESSIBLE_CONTAINERS, itemId, itemName, true);
+end
+
+--- Check if an item is in accessible inventory (inventory + wardrobes, not mog safe/storage/satchel)
+---@param itemId number|nil
+---@param itemName string|nil
+---@return boolean
+function M.IsItemInAccessibleInventory(itemId, itemName)
+    return M.CountAccessibleItem(itemId, itemName) > 0;
+end
+
+--- Check if an equip macro/action can currently be used
+---@param equipSlot string|nil
+---@param itemName string|nil
+---@param itemId number|nil
+---@return boolean
+function M.IsEquipActionAvailable(equipSlot, itemName, itemId)
+    if not itemName or itemName == '' then
+        return false;
+    end
+
+    if not itemId then
+        local actiondb = require('modules.hotbar.actiondb');
+        itemId = actiondb.GetItemId(itemName);
+    end
+
+    if not M.IsItemOwned(itemId, itemName) then
+        return false;
+    end
+
+    if equipSlot and itemId then
+        local resMgr = AshitaCore:GetResourceManager();
+        local item = resMgr and resMgr:GetItemById(itemId);
+        local slotMask = EQUIP_SLOT_MASKS[equipSlot];
+        if item and slotMask and item.Slots and bit.band(item.Slots, slotMask) == 0 then
+            return false;
+        end
+    end
+
+    return true;
+end
+
+--- Check if a pet command is available for the current job/pet context
+---@param commandName string
+---@return boolean
+function M.IsPetCommandAvailable(commandName)
+    if not commandName or commandName == '' then
+        return false;
+    end
+
+    local player = AshitaCore:GetMemoryManager():GetPlayer();
+    if not player then return true; end
+
+    local jobId = player:GetMainJob();
+    local petregistry = require('modules.hotbar.petregistry');
+    local petpalette = require('modules.hotbar.petpalette');
+
+    if not petregistry.IsPetJob(jobId) then
+        return false;
+    end
+
+    local avatarName = nil;
+    local activePetName = nil;
+    if jobId == petregistry.JOB_BST then
+        activePetName = petpalette.GetCurrentPetEntityName();
+    end
+
+    local commands = petregistry.GetPetCommandsForJob(jobId, avatarName, activePetName);
+    for _, cmd in ipairs(commands) do
+        if cmd.name == commandName then
+            return true;
+        end
+    end
+
+    return false;
+end
+
 -- Export helper for external use
 M.IsGarbageSpellName = IsGarbageSpellName;
 M.CONTAINERS = CONTAINERS;
+M.ACCESSIBLE_CONTAINERS = ACCESSIBLE_CONTAINERS;
 
 return M;

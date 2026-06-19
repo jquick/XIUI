@@ -32,11 +32,6 @@ local defaultPositions = require('libs.defaultpositions');
 
 local M = {};
 
--- Position save/restore state
-local hasAppliedSavedPosition = false;
-local forcePositionReset = false;
-local lastSavedPosX, lastSavedPosY = nil, nil;
-
 -- Debug logging (set to true to enable)
 local DEBUG_ENABLED = false;
 local function debugLog(msg, ...)
@@ -60,12 +55,6 @@ local BAR_HEIGHT = 3;
 -- ============================================
 -- State
 -- ============================================
-
--- Background primitive handle
-local bgPrimHandle = nil;
-
--- Theme tracking (for detecting changes like petbar)
-local loadedBgTheme = nil;
 
 -- Tab state: 1 = Pool view, 2 = History view
 local selectedTab = 1;
@@ -185,32 +174,36 @@ function M.DrawWindow(settings)
     -- Don't auto-switch tabs - let users control which tab they're viewing
     -- Each tab will show an appropriate empty state message if it has no content
 
-    -- Get settings with validation
+    -- Get settings with validation. globalScale (gs) stacks on top of per-module scales.
+    local gs = gConfig.globalScale or 1.0;
     local scaleX = gConfig.treasurePoolScaleX;
     if scaleX == nil or scaleX < 0.5 then scaleX = 1.0; end
+    scaleX = scaleX * gs;
 
     local scaleY = gConfig.treasurePoolScaleY;
     if scaleY == nil or scaleY < 0.5 then scaleY = 1.0; end
+    scaleY = scaleY * gs;
 
     local fontSize = gConfig.treasurePoolFontSize;
     if fontSize == nil or fontSize < 8 then fontSize = 10; end
+    fontSize = fontSize * gs;
 
     local showTitle = true;  -- Always show title
     local showTimerBar = gConfig.treasurePoolShowTimerBar ~= false;
     local showTimerText = gConfig.treasurePoolShowTimerText ~= false;
     local showLots = gConfig.treasurePoolShowLots ~= false;
-    -- Split background/border settings
-    local bgScale = gConfig.treasurePoolBgScale or 1.0;
-    local borderScale = gConfig.treasurePoolBorderScale or 1.0;
+    -- Split background/border settings (also scaled by gs so textures grow with rest of UI)
+    local bgScale = (gConfig.treasurePoolBgScale or 1.0) * gs;
+    local borderScale = (gConfig.treasurePoolBorderScale or 1.0) * gs;
     local bgOpacity = gConfig.treasurePoolBackgroundOpacity or 0.87;
     local borderOpacity = gConfig.treasurePoolBorderOpacity or 1.0;
     local bgTheme = gConfig.treasurePoolBackgroundTheme or 'Plain';
     local isExpanded = gConfig.treasurePoolExpanded == true;
     local isMinimized = gConfig.treasurePoolMinimized == true;
 
-    -- Calculate dimensions (different for expanded vs collapsed)
+    -- Calculate dimensions (different for expanded vs collapsed). scaleX/scaleY already include gs.
     local iconSize = math.floor(ICON_SIZE * scaleY);
-    local padding = PADDING;
+    local padding = math.floor(PADDING * gs);
     local iconTextGap = math.floor(ICON_TEXT_GAP * scaleX);
     local rowSpacing = math.floor(ROW_SPACING * scaleY);
     local barHeight = math.floor(BAR_HEIGHT * scaleY);
@@ -355,11 +348,11 @@ function M.DrawWindow(settings)
     if imgui.Begin('TreasurePool', true, windowFlags) then
         SaveWindowPosition('TreasurePool');
         local startX, startY = imgui.GetCursorScreenPos();
-        local drawList = imgui.GetBackgroundDrawList();
         local uiDrawList = GetUIDrawList();
+        local drawList = uiDrawList;
 
         -- Safety check for draw lists
-        if not drawList or not uiDrawList then
+        if not uiDrawList then
             imgui.End();
             return;
         end
@@ -367,19 +360,6 @@ function M.DrawWindow(settings)
         imtext.SetConfigFromSettings(settings.font_settings);
 
         imgui.Dummy({windowWidth, totalHeight});
-
-        -- Save position if moved (with change detection to avoid spam)
-        local winPosX, winPosY = imgui.GetWindowPos();
-        if not gConfig.lockPositions then
-            if lastSavedPosX == nil or
-               math.abs(winPosX - lastSavedPosX) > 1 or
-               math.abs(winPosY - lastSavedPosY) > 1 then
-                gConfig.treasurePoolWindowPosX = winPosX;
-                gConfig.treasurePoolWindowPosY = winPosY;
-                lastSavedPosX = winPosX;
-                lastSavedPosY = winPosY;
-            end
-        end
 
         -- Handle scroll input when hovering over window
         if needsScroll and imgui.IsWindowHovered() then
@@ -402,35 +382,23 @@ function M.DrawWindow(settings)
             contentHeightTotal = headerHeight + headerItemGap + visibleContentHeight;
         end
 
-        -- Update background (with safety checks)
-        if bgPrimHandle then
-            -- Check if theme changed
-            if loadedBgTheme ~= bgTheme then
-                loadedBgTheme = bgTheme;
-                pcall(function()
-                    windowBg.setTheme(bgPrimHandle, bgTheme, bgScale, borderScale);
-                end);
-            end
-
-            pcall(function()
-                -- For themed backgrounds (Window1-8), use white so texture shows through
-                -- For Plain backgrounds, use dark color with opacity
-                local bgColor = 0xFFFFFFFF;  -- White (no tint) for themed backgrounds
-                if bgTheme == 'Plain' then
-                    bgColor = 0xFF1A1A1A;  -- Dark gray for plain background
-                end
-
-                windowBg.update(bgPrimHandle, startX + padding, startY + padding, contentWidth, contentHeightTotal, {
-                    theme = bgTheme,
-                    padding = padding,
-                    bgScale = bgScale,
-                    borderScale = borderScale,
-                    bgOpacity = bgOpacity,
-                    borderOpacity = borderOpacity,
-                    bgColor = bgColor,
-                });
-            end);
+        -- Draw background + borders
+        -- For themed backgrounds (Window1-8), use white so texture shows through.
+        -- For Plain backgrounds, use dark color with opacity.
+        local bgColor = 0xFFFFFFFF;
+        if bgTheme == 'Plain' then
+            bgColor = 0xFF1A1A1A;
         end
+
+        windowBg.Draw(uiDrawList, startX + padding, startY + padding, contentWidth, contentHeightTotal, {
+            theme = bgTheme,
+            padding = padding,
+            bgScale = bgScale,
+            borderScale = borderScale,
+            bgOpacity = bgOpacity,
+            borderOpacity = borderOpacity,
+            bgColor = bgColor,
+        });
 
         local y = startY + padding;
 
@@ -509,7 +477,7 @@ function M.DrawWindow(settings)
                 local minimizeClicked = button.DrawMinimizePrim('tpMinimize', minimizeX, btnY, toggleSize, isMinimized, {
                     colors = button.COLORS_NEUTRAL,
                     tooltip = isMinimized and 'Maximize window' or 'Minimize to header only',
-                }, GetUIDrawList());
+                });
                 if minimizeClicked then
                     gConfig.treasurePoolMinimized = not gConfig.treasurePoolMinimized;
                     SaveSettingsToDisk();
@@ -522,7 +490,7 @@ function M.DrawWindow(settings)
                     tooltip = isMinimized
                         and (isExpanded and 'Maximize and collapse' or 'Maximize and expand')
                         or (isExpanded and 'Collapse' or 'Expand'),
-                }, GetUIDrawList());
+                });
                 if toggleClicked then
                     -- If minimized, maximize first then apply expand/collapse
                     if isMinimized then
@@ -589,7 +557,7 @@ function M.DrawWindow(settings)
                 local minimizeClicked = button.DrawMinimizePrim('tpMinimize', minimizeX, btnY, toggleSize, isMinimized, {
                     colors = button.COLORS_NEUTRAL,
                     tooltip = isMinimized and 'Maximize window' or 'Minimize to header only',
-                }, GetUIDrawList());
+                });
                 if minimizeClicked then
                     gConfig.treasurePoolMinimized = not gConfig.treasurePoolMinimized;
                     SaveSettingsToDisk();
@@ -602,7 +570,7 @@ function M.DrawWindow(settings)
                     tooltip = isMinimized
                         and (isExpanded and 'Maximize and collapse' or 'Maximize and expand')
                         or (isExpanded and 'Collapse' or 'Expand'),
-                }, GetUIDrawList());
+                });
                 if toggleClicked then
                     -- If minimized, maximize first then apply expand/collapse
                     if isMinimized then
@@ -1164,10 +1132,6 @@ function M.HideWindow()
         button.HidePrim(string.format('tpLotItem%d', slot));
         button.HidePrim(string.format('tpPassItem%d', slot));
     end
-
-    if bgPrimHandle then
-        windowBg.hide(bgPrimHandle);
-    end
 end
 
 -- ============================================
@@ -1175,32 +1139,9 @@ end
 -- ============================================
 
 function M.Initialize(settings)
-    -- Get background theme and scales from config (with defaults)
-    local bgTheme = gConfig.treasurePoolBackgroundTheme or 'Plain';
-    local bgScale = gConfig.treasurePoolBgScale or 1.0;
-    local borderScale = gConfig.treasurePoolBorderScale or 1.0;
-    loadedBgTheme = bgTheme;
-
-    -- Create background primitive
-    local primData = {
-        visible = false,
-        can_focus = false,
-        locked = true,
-        width = 100,
-        height = 100,
-    };
-    bgPrimHandle = windowBg.create(primData, bgTheme, bgScale, borderScale);
 end
 
 function M.UpdateVisuals(settings)
-    -- Check if theme changed
-    local bgTheme = gConfig.treasurePoolBackgroundTheme or 'Plain';
-    local bgScale = gConfig.treasurePoolBgScale or 1.0;
-    local borderScale = gConfig.treasurePoolBorderScale or 1.0;
-    if loadedBgTheme ~= bgTheme and bgPrimHandle then
-        loadedBgTheme = bgTheme;
-        windowBg.setTheme(bgPrimHandle, bgTheme, bgScale, borderScale);
-    end
 end
 
 function M.SetHidden(hidden)
@@ -1210,11 +1151,6 @@ function M.SetHidden(hidden)
 end
 
 function M.Cleanup()
-    if bgPrimHandle then
-        windowBg.destroy(bgPrimHandle);
-        bgPrimHandle = nil;
-    end
-
     -- Destroy primitive buttons
     button.DestroyPrim('tpToggle');
     button.DestroyPrim('tpMinimize');
@@ -1228,14 +1164,17 @@ function M.Cleanup()
         button.DestroyPrim(string.format('tpLotItem%d', slot));
         button.DestroyPrim(string.format('tpPassItem%d', slot));
     end
-
-    loadedBgTheme = nil;
     -- Icon cache handled by TextureManager
 end
 
 M.ResetPositions = function()
-    forcePositionReset = true;
-    hasAppliedSavedPosition = false;
+    local defX, defY = defaultPositions.GetTreasurePoolPosition();
+    if gConfig.windowPositions then
+        gConfig.windowPositions['TreasurePool'] = { x = defX, y = defY };
+    end
+    if gConfig.appliedPositions then
+        gConfig.appliedPositions['TreasurePool'] = nil;
+    end
 end
 
 return M;

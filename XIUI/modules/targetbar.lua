@@ -14,11 +14,6 @@ local defaultPositions = require('libs.defaultpositions');
 local TextureManager = require('libs.texturemanager');
 local mobdata = require('modules.mobinfo.data');
 
--- Position save/restore state
-local hasAppliedSavedPosition = false;
-local forcePositionReset = false;
-local lastSavedPosX, lastSavedPosY = nil, nil;
-
 -- TODO: Calculate these instead of manually setting them
 
 local bgAlpha = 0.4;
@@ -267,20 +262,6 @@ targetbar.DrawWindow = function(settings)
 	local isMonster = GetIsMob(targetEntity);
 
 	-- Draw the main target window
-	-- Handle position reset or restore
-	if forcePositionReset then
-		local defX, defY = defaultPositions.GetTargetBarPosition();
-		imgui.SetNextWindowPos({defX, defY}, ImGuiCond_Always);
-		forcePositionReset = false;
-		hasAppliedSavedPosition = true;
-		lastSavedPosX, lastSavedPosY = defX, defY;
-	elseif not hasAppliedSavedPosition and gConfig.targetBarWindowPosX ~= nil then
-		imgui.SetNextWindowPos({gConfig.targetBarWindowPosX, gConfig.targetBarWindowPosY}, ImGuiCond_Once);
-		hasAppliedSavedPosition = true;
-		lastSavedPosX = gConfig.targetBarWindowPosX;
-		lastSavedPosY = gConfig.targetBarWindowPosY;
-	end
-
 	local windowFlags = GetBaseWindowFlags(gConfig.lockPositions);
     ApplyWindowPosition('TargetBar');
     if (imgui.Begin('TargetBar', true, windowFlags)) then
@@ -694,18 +675,11 @@ targetbar.DrawWindow = function(settings)
 			local totalCastBarSpace = settings.castBarOffsetY + settings.castBarHeight + 2 + castTextHeight;
 			imgui.Dummy({0, totalCastBarSpace});
 		end
-		-- Save position if moved (with change detection to avoid spam)
-		local winPosX, winPosY = imgui.GetWindowPos();
-		if not gConfig.lockPositions then
-			if lastSavedPosX == nil or
-			   math.abs(winPosX - lastSavedPosX) > 1 or
-			   math.abs(winPosY - lastSavedPosY) > 1 then
-				gConfig.targetBarWindowPosX = winPosX;
-				gConfig.targetBarWindowPosY = winPosY;
-				lastSavedPosX = winPosX;
-				lastSavedPosY = winPosY;
-			end
-		end
+
+		-- ImGui 1.91+: SetCursorPos/SetCursorScreenPos no longer auto-extends window
+		-- content boundaries. Submit a zero-sized Dummy to commit any pending extensions
+		-- from SetCursorPosY (buffsOffsetY) or SetCursorScreenPos (arrow/ToT positioning).
+		imgui.Dummy({0, 0});
     end
     imgui.End();
 
@@ -899,8 +873,13 @@ targetbar.Cleanup = function()
 end
 
 targetbar.ResetPositions = function()
-	forcePositionReset = true;
-	hasAppliedSavedPosition = false;
+	local defX, defY = defaultPositions.GetTargetBarPosition();
+	if gConfig.windowPositions then
+		gConfig.windowPositions['TargetBar'] = { x = defX, y = defY };
+	end
+	if gConfig.appliedPositions then
+		gConfig.appliedPositions['TargetBar'] = nil;
+	end
 end
 
 targetbar.HandleActionPacket = function(actionPacket)

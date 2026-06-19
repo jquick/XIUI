@@ -24,7 +24,7 @@
 
 addon.name      = 'XIUI';
 addon.author    = 'Team XIUI';
-addon.version   = '1.7.5';
+addon.version   = '1.8.1';
 addon.desc      = 'Multiple UI elements with manager';
 addon.link      = 'https://github.com/tirem/XIUI'
 
@@ -76,6 +76,7 @@ local castCost = uiMods.castcost;
 local notifications = uiMods.notifications;
 local treasurePool = uiMods.treasurepool;
 local hotbar = uiMods.hotbar;
+local readyCheck = uiMods.readycheck;
 local macropalette = require('modules.hotbar.macropalette');
 local palette = require('modules.hotbar.palette');
 local skillchainModule = require('modules.hotbar.skillchain');
@@ -89,6 +90,8 @@ local statusHandler = require('handlers.statushandler');
 local progressbar = require('libs.progressbar');
 local diagnostics = require('libs.diagnostics');
 local TextureManager = require('libs.texturemanager');
+local imtext = require('libs.imtext');
+local components = require('config.components');
 
 -- Global switch to hard-disable functionality that is limited on HX servers
 HzLimitedMode = true;
@@ -150,6 +153,7 @@ uiModules.Register('playerBar', {
     configKey = 'showPlayerBar',
     hideOnEventKey = 'playerBarHideDuringEvents',
     hideOnMenuFocusKey = 'playerBarHideOnMenuFocus',
+    hideMacroPaletteKey = 'playerBarHideMacroPalette',
     hasSetHidden = true,
 });
 uiModules.Register('targetBar', {
@@ -158,6 +162,7 @@ uiModules.Register('targetBar', {
     configKey = 'showTargetBar',
     hideOnEventKey = 'targetBarHideDuringEvents',
     hideOnMenuFocusKey = 'targetBarHideOnMenuFocus',
+    hideMacroPaletteKey = 'targetBarHideMacroPalette',
     hasSetHidden = true,
 });
 uiModules.Register('enemyList', {
@@ -165,6 +170,7 @@ uiModules.Register('enemyList', {
     settingsKey = 'enemyListSettings',
     configKey = 'showEnemyList',
     hideOnMenuFocusKey = 'enemyListHideOnMenuFocus',
+    hideMacroPaletteKey = 'enemyListHideMacroPalette',
     hasSetHidden = true,
 });
 uiModules.Register('expBar', {
@@ -172,6 +178,7 @@ uiModules.Register('expBar', {
     settingsKey = 'expBarSettings',
     configKey = 'showExpBar',
     hideOnMenuFocusKey = 'expBarHideOnMenuFocus',
+    hideMacroPaletteKey = 'expBarHideMacroPalette',
     hasSetHidden = true,
 });
 uiModules.Register('gilTracker', {
@@ -179,6 +186,7 @@ uiModules.Register('gilTracker', {
     settingsKey = 'gilTrackerSettings',
     configKey = 'showGilTracker',
     hideOnMenuFocusKey = 'gilTrackerHideOnMenuFocus',
+    hideMacroPaletteKey = 'gilTrackerHideMacroPalette',
     hasSetHidden = true,
 });
 uiModules.Register('inventoryTracker', {
@@ -186,6 +194,7 @@ uiModules.Register('inventoryTracker', {
     settingsKey = 'inventoryTrackerSettings',
     configKey = 'showInventoryTracker',
     hideOnMenuFocusKey = 'inventoryTrackerHideOnMenuFocus',
+    hideMacroPaletteKey = 'inventoryTrackerHideMacroPalette',
     hasSetHidden = true,
 });
 uiModules.Register('satchelTracker', {
@@ -193,6 +202,7 @@ uiModules.Register('satchelTracker', {
     settingsKey = 'satchelTrackerSettings',
     configKey = 'showSatchelTracker',
     hideOnMenuFocusKey = 'inventoryTrackerHideOnMenuFocus',
+    hideMacroPaletteKey = 'inventoryTrackerHideMacroPalette',
     hasSetHidden = true,
 });
 uiModules.Register('lockerTracker', {
@@ -200,6 +210,7 @@ uiModules.Register('lockerTracker', {
     settingsKey = 'lockerTrackerSettings',
     configKey = 'showLockerTracker',
     hideOnMenuFocusKey = 'inventoryTrackerHideOnMenuFocus',
+    hideMacroPaletteKey = 'inventoryTrackerHideMacroPalette',
     hasSetHidden = true,
 });
 uiModules.Register('safeTracker', {
@@ -207,6 +218,7 @@ uiModules.Register('safeTracker', {
     settingsKey = 'safeTrackerSettings',
     configKey = 'showSafeTracker',
     hideOnMenuFocusKey = 'inventoryTrackerHideOnMenuFocus',
+    hideMacroPaletteKey = 'inventoryTrackerHideMacroPalette',
     hasSetHidden = true,
 });
 uiModules.Register('storageTracker', {
@@ -214,6 +226,7 @@ uiModules.Register('storageTracker', {
     settingsKey = 'storageTrackerSettings',
     configKey = 'showStorageTracker',
     hideOnMenuFocusKey = 'inventoryTrackerHideOnMenuFocus',
+    hideMacroPaletteKey = 'inventoryTrackerHideMacroPalette',
     hasSetHidden = true,
 });
 uiModules.Register('wardrobeTracker', {
@@ -221,6 +234,7 @@ uiModules.Register('wardrobeTracker', {
     settingsKey = 'wardrobeTrackerSettings',
     configKey = 'showWardrobeTracker',
     hideOnMenuFocusKey = 'inventoryTrackerHideOnMenuFocus',
+    hideMacroPaletteKey = 'inventoryTrackerHideMacroPalette',
     hasSetHidden = true,
 });
 uiModules.Register('partyList', {
@@ -229,6 +243,8 @@ uiModules.Register('partyList', {
     configKey = 'showPartyList',
     hideOnEventKey = 'partyListHideDuringEvents',
     hideOnMenuFocusKey = 'partyListHideOnMenuFocus',
+    hideMacroPaletteKey = 'partyListHideMacroPalette',
+    hideOnlyAllianceOnMenuFocusKey = 'partyListHideOnlyAllianceOnMenuFocus',
     hasSetHidden = true,
 });
 uiModules.Register('castBar', {
@@ -236,6 +252,7 @@ uiModules.Register('castBar', {
     settingsKey = 'castBarSettings',
     configKey = 'showCastBar',
     hideOnMenuFocusKey = 'castBarHideOnMenuFocus',
+    hideMacroPaletteKey = 'castBarHideMacroPalette',
     hasSetHidden = true,
 });
 uiModules.Register('castCost', {
@@ -243,6 +260,7 @@ uiModules.Register('castCost', {
     settingsKey = 'castCostSettings',
     configKey = 'showCastCost',
     hideOnMenuFocusKey = 'castCostHideOnMenuFocus',
+    hideMacroPaletteKey = 'castCostHideMacroPalette',
     hasSetHidden = true,
 });
 uiModules.Register('mobInfo', {
@@ -250,6 +268,7 @@ uiModules.Register('mobInfo', {
     settingsKey = 'mobInfoSettings',
     configKey = 'showMobInfo',
     hideOnMenuFocusKey = 'mobInfoHideOnMenuFocus',
+    hideMacroPaletteKey = 'mobInfoHideMacroPalette',
     hasSetHidden = true,
 });
 uiModules.Register('petBar', {
@@ -258,6 +277,7 @@ uiModules.Register('petBar', {
     configKey = 'showPetBar',
     hideOnEventKey = 'petBarHideDuringEvents',
     hideOnMenuFocusKey = 'petBarHideOnMenuFocus',
+    hideMacroPaletteKey = 'petBarHideMacroPalette',
     hasSetHidden = true,
 });
 uiModules.Register('notifications', {
@@ -266,6 +286,7 @@ uiModules.Register('notifications', {
     configKey = 'showNotifications',
     hideOnEventKey = 'notificationsHideDuringEvents',
     hideOnMenuFocusKey = 'notificationsHideOnMenuFocus',
+    hideMacroPaletteKey = 'notificationsHideMacroPalette',
     hasSetHidden = true,
 });
 uiModules.Register('treasurePool', {
@@ -273,6 +294,7 @@ uiModules.Register('treasurePool', {
     settingsKey = 'treasurePoolSettings',
     configKey = 'treasurePoolEnabled',
     hideOnMenuFocusKey = 'treasurePoolHideOnMenuFocus',
+    hideMacroPaletteKey = 'treasurePoolHideMacroPalette',
     hasSetHidden = true,
 });
 uiModules.Register('hotbar', {
@@ -281,6 +303,13 @@ uiModules.Register('hotbar', {
     configKey = 'showhotbar',
     hideOnEventKey = 'hotbarHideDuringEvents',
     hideOnMenuFocusKey = 'hotbarHideOnMenuFocus',
+    hideMacroPaletteKey = 'hotbarHideMacroPalette',
+    hasSetHidden = true,
+});
+uiModules.Register('readyCheck', {
+    module = readyCheck,
+    settingsKey = nil,
+    configKey = 'showReadyCheck',
     hasSetHidden = true,
 });
 
@@ -298,7 +327,7 @@ local migrationResult = settingsMigration.MigrateFromHXUI();
 -- Load raw settings to detect legacy data (without default filtering)
 -- Use pcall to handle first-load case where no settings exist
 local rawSettingsSuccess, rawSettings = pcall(function()
-    return settings.load({});
+    return settings.load(T{ });
 end);
 if not rawSettingsSuccess then
     rawSettings = {}; -- No existing settings, nothing to migrate
@@ -451,7 +480,7 @@ end
 -- ==========================================================
 
 -- Load character settings (tracks which profile is active)
-local charSettings = settings.load({ currentProfile = 'Default' });
+local charSettings = settings.load(T{ currentProfile = 'Default' });
 config = charSettings; -- Keep reference to character config
 
 -- Global profiles list
@@ -479,6 +508,55 @@ else
 end
 
 gConfig.appliedPositions = {};
+
+-- Forward-declare GetDefaultWindowPositions so it can be used at load time
+local function GetDefaultWindowPositions()
+    local defPos = require('libs.defaultpositions');
+    local px, py = defPos.GetPlayerBarPosition();
+    local tx, ty = defPos.GetTargetBarPosition();
+    local pl1x, pl1y = defPos.GetPartyListPosition();
+    local pl2x, pl2y = defPos.GetPartyList2Position();
+    local pl3x, pl3y = defPos.GetPartyList3Position();
+    local cx, cy = defPos.GetCastBarPosition();
+    local nx, ny = defPos.GetNotificationsPosition();
+    local tpx, tpy = defPos.GetTreasurePoolPosition();
+    local petx, pety = defPos.GetPetBarPosition();
+    local ex, ey = defPos.GetExpBarPosition();
+    local gx, gy = defPos.GetGilTrackerPosition();
+    local ix, iy = defPos.GetInventoryPosition();
+    local elx, ely = defPos.GetEnemyListPosition();
+    local ccx, ccy = defPos.GetCastCostPosition();
+
+    local staggerY = 35;
+    return {
+        PlayerBar = { x = px, y = py },
+        TargetBar = { x = tx, y = ty },
+        PartyList = { x = pl1x, y = pl1y },
+        PartyList2 = { x = pl2x, y = pl2y },
+        PartyList3 = { x = pl3x, y = pl3y },
+        CastBar = { x = cx, y = cy },
+        Notifications_Group1 = { x = nx, y = ny },
+        Notifications_Group2 = { x = nx, y = ny + 180 },
+        TreasurePool = { x = tpx, y = tpy },
+        PetBar = { x = petx, y = pety },
+        ExpBar = { x = ex, y = ey },
+        GilTracker = { x = gx, y = gy },
+        EnemyList = { x = elx, y = ely },
+        CastCost = { x = ccx, y = ccy },
+        InventoryTracker = { x = ix, y = iy },
+        SatchelTracker = { x = ix, y = iy + staggerY },
+        SafeTracker = { x = ix, y = iy + staggerY * 2 },
+        StorageTracker = { x = ix, y = iy + staggerY * 3 },
+        LockerTracker = { x = ix, y = iy + staggerY * 4 },
+        WardrobeTracker = { x = ix, y = iy + staggerY * 5 },
+    };
+end
+
+-- Inject default positions if profile has none (brand new profile)
+if (not gConfig.windowPositions or next(gConfig.windowPositions) == nil) then
+    gConfig.windowPositions = GetDefaultWindowPositions();
+end
+
 gConfigVersion = 0;
 settingsMigration.RunStructureMigrations(gConfig, defaultUserSettings);
 
@@ -519,38 +597,6 @@ end
 function GetLayoutTemplate(partyIndex)
     local party = GetPartySettings(partyIndex);
     return party.layout == 1 and gConfig.layoutCompact or gConfig.layoutHorizontal;
-end
-
-local function GetDefaultWindowPositions()
-    local defPos = require('libs.defaultpositions');
-    local px, py = defPos.GetPlayerBarPosition();
-    local tx, ty = defPos.GetTargetBarPosition();
-    local pl1x, pl1y = defPos.GetPartyListPosition();
-    local pl2x, pl2y = defPos.GetPartyList2Position();
-    local pl3x, pl3y = defPos.GetPartyList3Position();
-    local cx, cy = defPos.GetCastBarPosition();
-    local nx, ny = defPos.GetNotificationsPosition();
-    local tpx, tpy = defPos.GetTreasurePoolPosition();
-    local petx, pety = defPos.GetPetBarPosition();
-    local ex, ey = defPos.GetExpBarPosition();
-    local gx, gy = defPos.GetGilTrackerPosition();
-    local ix, iy = defPos.GetInventoryPosition();
-
-    return {
-        PlayerBar = { x = px, y = py },
-        TargetBar = { x = tx, y = ty },
-        PartyList = { x = pl1x, y = pl1y },
-        PartyList2 = { x = pl2x, y = pl2y },
-        PartyList3 = { x = pl3x, y = pl3y },
-        CastBar = { x = cx, y = cy },
-        Notifications_Group1 = { x = nx, y = ny },
-        Notifications_Group2 = { x = nx, y = ny + 180 },
-        TreasurePool = { x = tpx, y = tpy },
-        PetBar = { x = petx, y = pety },
-        ExpBar = { x = ex, y = ey },
-        GilTracker = { x = gx, y = gy },
-        InventoryTracker = { x = ix, y = iy },
-    };
 end
 
 function CreateProfile(name)
@@ -653,12 +699,9 @@ function ResetSettings()
     gConfig.windowPositions = GetDefaultWindowPositions();
     gConfig.appliedPositions = {};
     profileManager.SaveProfileSettings(config.currentProfile, gConfig);
-    UpdateSettings();
-    bInternalSave = true;
-    settings.save();
-    if bIsAshita43 then bPendingInternalSaveClear = true; else bInternalSave = false; end
 
-    -- Reset all module positions to defaults
+    -- Reset all module positions to defaults BEFORE deferring visuals so the
+    -- next-frame UpdateVisualsAll picks up the corrected positions.
     uiMods.playerbar.ResetPositions();
     uiMods.targetbar.ResetPositions();
     uiMods.castbar.ResetPositions();
@@ -672,26 +715,31 @@ function ResetSettings()
     uiMods.notifications.ResetPositions();
     uiMods.treasurepool.ResetPositions();
     hotbar.ResetPositions();
+
+    -- Persist + defer the heavy visual update cascade. ResetSettings is called
+    -- from an imgui button callback inside d3d_present; running UpdateVisualsAll
+    -- inline orphans textures via the gConfig replacement above and triggers
+    -- mid-frame Lua GC that can call d3d8.gc_safe_release on textures still
+    -- queued for draw this frame (hard CTD on Ashita 4.3). The deferred block
+    -- at the top of the next d3d_present runs the same cascade outside the
+    -- active draw list. See ai/lessons.md.
+    SaveSettingsOnly();
+    DeferredUpdateVisuals();
 end
 
-function CenterAllPositions()
-    local defPos = require('libs.defaultpositions');
-    local sw, sh = defPos.GetScreenSize();
-    local cx = sw / 2;
-    local cy = sh / 2;
-
+function RecoverAllPositions()
     if not gConfig.windowPositions then gConfig.windowPositions = {}; end
 
-    -- Center every known window position
+    -- Move every known window position to top-left corner
     for windowName, _ in pairs(gConfig.windowPositions) do
-        gConfig.windowPositions[windowName] = { x = cx, y = cy };
+        gConfig.windowPositions[windowName] = { x = 20, y = 20 };
     end
 
     -- Force re-apply on next frame
     gConfig.appliedPositions = {};
 
-    -- Reset the config window position too
-    configMenu.ResetConfigWindowPosition();
+    -- Clear persisted alignment state so alignBottom doesn't override the restored positions
+    gConfig.partyListState = {};
 
     -- Save
     profileManager.SaveProfileSettings(config.currentProfile, gConfig);
@@ -934,6 +982,17 @@ ashita.events.register('d3d_present', 'present_cb', function ()
     if not bInitialized then return; end
 
     local ok, err = pcall(function()
+        -- Drop references to textures evicted/cleared during the PREVIOUS
+        -- frame so Lua GC is free to run d3d8.gc_safe_release on them.
+        -- Must run before anything else this frame queues new draws or
+        -- triggers another cache clear.
+        TextureManager.FlushPendingReleases();
+
+        -- Process deferred icon cache clears scheduled by macro CRUD last frame.
+        -- Must run AFTER FlushPendingReleases (so prior evictions are safe) and
+        -- BEFORE any rendering this frame (so stale caches don't produce wrong icons).
+        macropalette.FlushPendingFrameWork();
+
         -- Clear internal save flag (deferred for Ashita 4.3+ async callbacks)
         if bPendingInternalSaveClear then
             bInternalSave = false;
@@ -952,11 +1011,16 @@ ashita.events.register('d3d_present', 'present_cb', function ()
             end
         end
 
-        -- Process pending visual updates outside the render loop
+        -- Process pending visual updates outside the render loop.
+        -- Mirrors UpdateSettings() so SaveSettingsOnly+DeferredUpdateVisuals
+        -- can fully replace inline UpdateSettings() in config callbacks.
         if pendingVisualUpdate then
             pendingVisualUpdate = false;
             statusHandler.clear_cache();
             UpdateUserSettings();
+            CheckVisibility();
+            InvalidateInterpolationColorCache();
+            InvalidateColorCaches();
             uiModules.UpdateVisualsAll(gAdjustedSettings);
         end
 
@@ -1012,6 +1076,12 @@ ashita.events.register('load', 'load_cb', function ()
     profileManager.SyncProfilesWithDisk();
     gConfig.appliedPositions = {};
     UpdateUserSettings();
+
+    -- Populate the ImGui font atlas now, before the first d3d_present, so
+    -- no font change in the config menu has to mutate the atlas mid-frame.
+    -- See libs/imtext.lua PrewarmFonts comment for the underlying constraint.
+    imtext.PrewarmFonts(components.available_fonts);
+
     uiModules.InitializeAll(gAdjustedSettings);
 
     -- Load mob data for current zone
@@ -1148,9 +1218,10 @@ ashita.events.register('command', 'command_cb', function (e)
             return;
         end
 
-        -- Palette commands: /xiui palette <name|next|prev> [bar|all]
-        -- Switch between named palettes for hotbars
-        -- Use "all" to affect all bars at once (like tHotBar behavior)
+        -- Palette commands: /xiui palette <name|next|prev|list|first> [bar|all|crossbar]
+        -- Switch between named palettes. Hotbar palettes (bars 1-6) and the crossbar
+        -- have separate palette pools; "all" applies across both, "crossbar"/"cb"/"xb"
+        -- targets the crossbar only, a bar number targets a single hotbar.
         if (command_args[2] == 'palette' or command_args[2] == 'pal') then
             local paletteModule = require('modules.hotbar.palette');
             local hotbarData = require('modules.hotbar.data');
@@ -1158,14 +1229,15 @@ ashita.events.register('command', 'command_cb', function (e)
             local subjobId = hotbarData.subjobId or 0;
 
             if #command_args < 3 then
-                -- No argument - show current palette info and help
                 print('[XIUI] Palette commands:');
-                print('  /xiui palette <name> - Switch to a named palette');
-                print('  /xiui palette next - Cycle to next palette');
-                print('  /xiui palette prev - Cycle to previous palette');
-                print('  /xiui palette list - List available palettes');
-                print('  /xiui palette first - Switch to first palette');
+                print('  /xiui palette <name> [bar|all|crossbar] - Switch to a named palette');
+                print('  /xiui palette next [crossbar]            - Cycle to next palette');
+                print('  /xiui palette prev [crossbar]            - Cycle to previous palette');
+                print('  /xiui palette list [crossbar]            - List available palettes');
+                print('  /xiui palette first [crossbar]           - Switch to first palette');
                 print('');
+                print('Target: omit for hotbars + crossbar, "crossbar"/"cb"/"xb" for crossbar only,');
+                print('or a bar number 1-6 to target a single hotbar.');
                 print('Keybinds: Ctrl+Up/Down (configure in Hotbar > Palette Cycling)');
                 print('Controller: RB + Dpad Up/Down cycles palettes');
                 return;
@@ -1173,38 +1245,86 @@ ashita.events.register('command', 'command_cb', function (e)
 
             local action = command_args[3];
             local barArg = command_args[4];
-            local affectAll = (barArg == 'all');
-            local barIndex = affectAll and 1 or (tonumber(barArg) or 1);
 
-            -- Helper to apply action to bar(s)
-            local function applyToBar(idx)
-                return paletteModule.CyclePalette(idx, action == 'next' and 1 or -1, jobId, subjobId);
+            local function isCrossbarTarget(arg)
+                if not arg then return false; end
+                local lower = arg:lower();
+                return lower == 'crossbar' or lower == 'cb' or lower == 'xb';
             end
+
+            local affectAll = (barArg == 'all');
+            local affectCrossbar = isCrossbarTarget(barArg);
+            local barIndex = (affectAll or affectCrossbar) and 1 or (tonumber(barArg) or 1);
 
             if action == 'next' or action == 'prev' or action == 'previous' then
                 local direction = (action == 'next') and 1 or -1;
-                -- Global palette cycling - affects all bars at once
-                local result = paletteModule.CyclePalette(1, direction, jobId, subjobId);
-                if result then
-                    print('[XIUI] Palette: ' .. result);
+                local results = {};
+
+                if not affectCrossbar then
+                    -- Cycle hotbar palettes (global - bar 1 represents all hotbars)
+                    local hotbarResult = paletteModule.CyclePalette(1, direction, jobId, subjobId);
+                    if hotbarResult then
+                        table.insert(results, 'Hotbar: ' .. hotbarResult);
+                    end
+                end
+
+                -- Cycle crossbar palette (global across combo modes)
+                local crossbarResult = paletteModule.CyclePaletteForCombo(nil, direction, jobId, subjobId);
+                if crossbarResult then
+                    table.insert(results, 'Crossbar: ' .. crossbarResult);
+                end
+
+                if #results > 0 then
+                    print('[XIUI] Palette -> ' .. table.concat(results, ', '));
                 else
                     print('[XIUI] No palettes to cycle');
                 end
             elseif action == 'list' then
-                -- List available palettes
-                local palettes = paletteModule.GetAvailablePalettes(barIndex, jobId, subjobId);
-                local currentPalette = paletteModule.GetActivePaletteDisplayName(barIndex);
-                print('[XIUI] Bar ' .. barIndex .. ' palettes:');
-                for _, name in ipairs(palettes) do
-                    local marker = (name == currentPalette) and ' *' or '';
-                    print('  - ' .. name .. marker);
+                if not affectCrossbar then
+                    local palettes = paletteModule.GetAvailablePalettes(barIndex, jobId, subjobId);
+                    local currentPalette = paletteModule.GetActivePaletteDisplayName(barIndex);
+                    print('[XIUI] Bar ' .. barIndex .. ' palettes:');
+                    for _, name in ipairs(palettes) do
+                        local marker = (name == currentPalette) and ' *' or '';
+                        print('  - ' .. name .. marker);
+                    end
+                end
+
+                -- List crossbar palettes (omitted only when targeting a specific hotbar)
+                if affectCrossbar or not tonumber(barArg) then
+                    local crossbarPalettes = paletteModule.GetCrossbarAvailablePalettes(jobId, subjobId);
+                    local activeCrossbar = paletteModule.GetActivePaletteDisplayNameForCombo();
+                    print('[XIUI] Crossbar palettes:');
+                    if #crossbarPalettes == 0 then
+                        print('  (none defined)');
+                    else
+                        for _, name in ipairs(crossbarPalettes) do
+                            local marker = (name == activeCrossbar) and ' *' or '';
+                            print('  - ' .. name .. marker);
+                        end
+                    end
                 end
             elseif action == 'base' or action == 'reset' or action == 'first' then
-                -- Switch to first palette
-                local palettes = paletteModule.GetAvailablePalettes(1, jobId, subjobId);
-                if #palettes > 0 then
-                    paletteModule.SetActivePalette(1, palettes[1]);
-                    print('[XIUI] Palette: ' .. palettes[1]);
+                local firstNames = {};
+
+                if not affectCrossbar then
+                    local palettes = paletteModule.GetAvailablePalettes(1, jobId, subjobId);
+                    if #palettes > 0 then
+                        for i = 1, 6 do
+                            paletteModule.SetActivePalette(i, palettes[1]);
+                        end
+                        table.insert(firstNames, 'Hotbar: ' .. palettes[1]);
+                    end
+                end
+
+                local crossbarPalettes = paletteModule.GetCrossbarAvailablePalettes(jobId, subjobId);
+                if #crossbarPalettes > 0 then
+                    paletteModule.SetActivePaletteForCombo(nil, crossbarPalettes[1]);
+                    table.insert(firstNames, 'Crossbar: ' .. crossbarPalettes[1]);
+                end
+
+                if #firstNames > 0 then
+                    print('[XIUI] Palette -> ' .. table.concat(firstNames, ', '));
                 else
                     print('[XIUI] No palettes available');
                 end
@@ -1214,22 +1334,25 @@ ashita.events.register('command', 'command_cb', function (e)
                 local originalArgs = e.command:args();
                 local paletteName = originalArgs[3];  -- Use original case
                 local targetIsAll = false;
+                local targetIsCrossbar = false;
 
                 if #originalArgs >= 4 then
                     local lastArg = originalArgs[#originalArgs];
-                    if lastArg:lower() == 'all' then
+                    local lastLower = lastArg:lower();
+                    local isAllSuffix = (lastLower == 'all');
+                    local isCrossbarSuffix = isCrossbarTarget(lastArg);
+                    local isBarSuffix = tonumber(lastArg) ~= nil;
+
+                    if isAllSuffix then
                         targetIsAll = true;
-                        -- Palette name is everything between arg 3 and "all"
-                        if #originalArgs > 4 then
-                            local nameParts = {};
-                            for i = 3, #originalArgs - 1 do
-                                table.insert(nameParts, originalArgs[i]);
-                            end
-                            paletteName = table.concat(nameParts, ' ');
-                        end
-                    elseif tonumber(lastArg) then
+                    elseif isCrossbarSuffix then
+                        targetIsCrossbar = true;
+                    elseif isBarSuffix then
                         barIndex = tonumber(lastArg);
-                        -- Palette name is everything between arg 3 and the bar number
+                    end
+
+                    if isAllSuffix or isCrossbarSuffix or isBarSuffix then
+                        -- Palette name is everything between arg 3 and the suffix
                         if #originalArgs > 4 then
                             local nameParts = {};
                             for i = 3, #originalArgs - 1 do
@@ -1238,7 +1361,7 @@ ashita.events.register('command', 'command_cb', function (e)
                             paletteName = table.concat(nameParts, ' ');
                         end
                     else
-                        -- No bar number or "all", palette name is all remaining args
+                        -- No suffix, palette name is all remaining args
                         local nameParts = {};
                         for i = 3, #originalArgs do
                             table.insert(nameParts, originalArgs[i]);
@@ -1247,8 +1370,15 @@ ashita.events.register('command', 'command_cb', function (e)
                     end
                 end
 
-                if targetIsAll then
-                    -- Apply to all bars
+                if targetIsCrossbar then
+                    if paletteModule.CrossbarPaletteExists(paletteName, jobId, subjobId) then
+                        paletteModule.SetActivePaletteForCombo(nil, paletteName);
+                        print('[XIUI] Crossbar palette: ' .. paletteName);
+                    else
+                        print('[XIUI] Crossbar palette "' .. paletteName .. '" not found');
+                    end
+                elseif targetIsAll then
+                    -- Apply across all hotbars and the crossbar
                     local anyFound = false;
                     for i = 1, 6 do
                         if paletteModule.PaletteExists(i, paletteName, jobId, subjobId) then
@@ -1256,13 +1386,17 @@ ashita.events.register('command', 'command_cb', function (e)
                             anyFound = true;
                         end
                     end
+                    if paletteModule.CrossbarPaletteExists(paletteName, jobId, subjobId) then
+                        paletteModule.SetActivePaletteForCombo(nil, paletteName);
+                        anyFound = true;
+                    end
                     if anyFound then
                         print('[XIUI] All bars palette: ' .. paletteName);
                     else
                         print('[XIUI] Palette "' .. paletteName .. '" not found');
                     end
                 else
-                    -- Apply to single bar
+                    -- Apply to single hotbar
                     if paletteModule.PaletteExists(barIndex, paletteName, jobId, subjobId) then
                         paletteModule.SetActivePalette(barIndex, paletteName);
                         print('[XIUI] Bar ' .. barIndex .. ' palette: ' .. paletteName);
@@ -1301,6 +1435,10 @@ ashita.events.register('command', 'command_cb', function (e)
                 -- Toggle hotbar debug mode
                 local currentState = hotbar.IsDebugEnabled();
                 hotbar.SetDebugEnabled(not currentState);
+            elseif moduleName == 'subtarget' then
+                -- Toggle subtarget macro debug (ST wait/confirm/cancel only)
+                local currentState = hotbar.IsSubtargetDebugEnabled();
+                hotbar.SetSubtargetDebugEnabled(not currentState);
             elseif moduleName == 'macroblock' then
                 -- Toggle macro block debug mode (both memory patches AND controller)
                 local macrosLib = require('libs.ffxi.macros');
@@ -1319,7 +1457,7 @@ ashita.events.register('command', 'command_cb', function (e)
                 local currentState = hotbar.IsPaletteDebugEnabled();
                 hotbar.SetPaletteDebugEnabled(not currentState);
             else
-                print('[XIUI] Debug modules: hotbar, macroblock, rawinput, palette');
+                print('[XIUI] Debug modules: hotbar, subtarget, macroblock, rawinput, palette');
                 print('[XIUI] Usage: /xiui debug <module>');
             end
             return;
@@ -1338,8 +1476,8 @@ ashita.events.register('command', 'command_cb', function (e)
         if (command_args[2] == 'profile') then
             -- /xiui profile reset positions
             if (command_args[3] == 'reset' and command_args[4] == 'positions') then
-                CenterAllPositions();
-                print(chat.header(addon.name):append(chat.message('All UI positions reset to center.')));
+                RecoverAllPositions();
+                print(chat.header(addon.name):append(chat.message('All UI positions recovered to top-left.')));
                 return;
             end
 
@@ -1484,6 +1622,18 @@ ashita.events.register('command', 'command_cb', function (e)
             print(chat.header(addon.name):append(chat.message('Settings saved.')));
             return;
         end
+    end
+
+    -- Forward /readycheck commands to the ReadyCheck module
+    if readyCheck.HandleCommand(e) then
+        e.blocked = true;
+        return;
+    end
+end);
+
+ashita.events.register('text_in', 'readycheck_text_in_cb', function (e)
+    if bInitialized then
+        readyCheck.HandleTextIn(e);
     end
 end);
 

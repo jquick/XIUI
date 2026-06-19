@@ -8,11 +8,20 @@ local d3d8 = require('d3d8');
 local data = require('modules.hotbar.data');
 local horizonSpells = require('modules.hotbar.database.horizonspells');
 local textures = require('modules.hotbar.textures');
+local actiondb = require('modules.hotbar.actiondb');
+local playerdata = require('modules.hotbar.playerdata');
+local TextureManager = require('libs.texturemanager');
 local macrosLib = require('libs.ffxi.macros');
+package.loaded['libs.target'] = nil;
+local targetLib = require('libs.target');
+if not targetLib.GetSubTargetActive or not targetLib.HasMainTarget then
+    error('[XIUI] libs/target.lua is missing subtarget helpers; update the addon files and reload.');
+end
 local palette = require('modules.hotbar.palette');
 
--- Debug logging (controlled via /xiui debug hotbar)
+-- Debug logging (controlled via /xiui debug hotbar and /xiui debug subtarget)
 local DEBUG_ENABLED = false;
+local DEBUG_SUBTARGET = false;
 
 local function DebugLog(msg)
     if DEBUG_ENABLED then
@@ -20,10 +29,20 @@ local function DebugLog(msg)
     end
 end
 
+local function SubtargetDebugLog(msg)
+    if DEBUG_SUBTARGET then
+        print('[XIUI Hotbar ST] ' .. msg);
+    end
+end
+
 --- Set debug mode for actions module
 --- @param enabled boolean
 local function SetDebugEnabled(enabled)
     DEBUG_ENABLED = enabled;
+end
+
+local function SetSubtargetDebugEnabled(enabled)
+    DEBUG_SUBTARGET = enabled;
 end
 
 -- ============================================
@@ -180,6 +199,29 @@ end
 
 -- Cache for custom icons loaded from disk
 local customIconCache = {};
+
+-- Negative-result cache: keyed strings for which GetBindIcon already returned nil.
+-- Skips the lookup work (hashmap probes, GetSpellByName, name->id scans) on subsequent
+-- cache misses in display.iconCache. Invalidated whenever an upstream cache that affects
+-- icon resolution is wiped (job/pet/palette change, macroDB edit).
+local noIconCache = {};
+
+-- Build a key for noIconCache from the fields GetBindIcon branches on.
+-- Includes macroRef because the macro lookup at the top of GetBindIcon
+-- can change a slot's icon resolution.
+local function buildNoIconKey(bind)
+    if not bind then return nil; end
+    local key = (bind.actionType or '') .. ':' .. (bind.action or '');
+    if bind.customIconType or bind.customIconId or bind.customIconPath then
+        key = key .. ':ci:' .. (bind.customIconType or '')
+                  .. ':' .. tostring(bind.customIconId or '')
+                  .. ':' .. (bind.customIconPath or '');
+    end
+    if bind.macroRef then
+        key = key .. ':mr:' .. tostring(bind.macroRef);
+    end
+    return key;
+end
 
 -- Mapping from summoning spell names to texture cache keys
 -- Spell names (as they appear in-game) -> texture key (as loaded in textures.lua)
@@ -360,16 +402,25 @@ local itemIconCache = {};
 -- Helper Functions
 -- ============================================
 
+-- O(1) lookup from English spell name -> horizonSpells entry. Built lazily on first use.
+local spellByNameLookup = nil;
+
+local function buildSpellByNameLookup()
+    spellByNameLookup = {};
+    for _, spell in pairs(horizonSpells) do
+        if spell.en then
+            spellByNameLookup[spell.en] = spell;
+        end
+    end
+end
+
 --- Find a spell by English name in horizonspells
 ---@param spellName string The English name of the spell
 ---@return table|nil The spell data table with en, icon_id, prefix, and id fields
 local function GetSpellByName(spellName)
-    for _, spell in pairs(horizonSpells) do
-        if spell.en == spellName then
-            return spell;
-        end
-    end
-    return nil;
+    if not spellName then return nil; end
+    if not spellByNameLookup then buildSpellByNameLookup(); end
+    return spellByNameLookup[spellName];
 end
 
 --- Get MP cost for an action (only applicable to magic spells)
@@ -377,6 +428,17 @@ end
 ---@return number|nil mpCost The MP cost, or nil if not applicable
 function M.GetMPCost(bind)
     if not bind then return nil; end
+
+    -- Macros with a magic recast source surface that spell's MP cost so the
+    -- slot shows the underlying spell's mana alongside its cooldown.
+    if bind.actionType == 'macro' and bind.recastSourceType == 'ma' and bind.recastSourceAction then
+        local spell = GetSpellByName(bind.recastSourceAction);
+        if spell and spell.mp_cost and spell.mp_cost > 0 then
+            return spell.mp_cost;
+        end
+        return nil;
+    end
+
     if bind.actionType ~= 'ma' then return nil; end
 
     local spell = GetSpellByName(bind.action);
@@ -386,6 +448,128 @@ function M.GetMPCost(bind)
     return nil;
 end
 
+-- TP cost cache for weaponskills (static resource data)
+local wsTpCostCache = {};
+
+-- Action types checked directly for job/gear/inventory availability dimming
+local AVAILABILITY_ACTION_TYPES = {
+    ma = true, ja = true, ws = true, pet = true, equip = true, item = true,
+};
+
+--- Whether a bind shows item quantity on the slot (item action or macro item recast)
+---@param bind table|nil
+---@return boolean
+function M.UsesItemQuantityOverlay(bind)
+    if not bind then return false; end
+    return bind.actionType == 'item'
+        or (bind.actionType == 'macro' and bind.recastSourceType == 'item');
+end
+
+--- Whether this bind should be checked for job/gear availability dimming
+---@param bind table
+---@return boolean
+function M.NeedsAvailabilityCheck(bind)
+    if not bind then return false; end
+    if AVAILABILITY_ACTION_TYPES[bind.actionType] then return true; end
+    return bind.actionType == 'macro'
+        and bind.recastSourceType ~= nil
+        and bind.recastSourceType ~= 'none';
+end
+
+--- Whether this bind should be dimmed when the player lacks enough TP
+---@param bind table
+---@return boolean
+function M.NeedsTpCheck(bind)
+    if not bind then return false; end
+
+    if bind.actionType == 'ws' then
+        return true;
+    end
+
+    if bind.actionType == 'macro' and bind.recastSourceType == 'ws' and bind.recastSourceAction then
+        return true;
+    end
+
+    return false;
+end
+
+--- Get TP cost for a weaponskill (clamped to 1000-3000)
+---@param wsName string
+---@return number
+function M.GetWeaponskillTpCost(wsName)
+    if not wsName or wsName == '' then
+        return 1000;
+    end
+
+    local cached = wsTpCostCache[wsName];
+    if cached then
+        return cached;
+    end
+
+    local tpCost = 1000;
+    local abilityId = actiondb.GetAbilityId(wsName);
+    if abilityId then
+        local ability = AshitaCore:GetResourceManager():GetAbilityById(abilityId);
+        if ability and ability.TP and ability.TP >= 1000 then
+            tpCost = ability.TP;
+        end
+    end
+
+    if tpCost > 3000 then
+        tpCost = 3000;
+    end
+
+    wsTpCostCache[wsName] = tpCost;
+    return tpCost;
+end
+
+--- Check if the player currently has enough TP for a weaponskill bind
+---@param bind table
+---@return boolean hasEnoughTp
+function M.HasEnoughTpForBind(bind)
+    if not M.NeedsTpCheck(bind) then
+        return true;
+    end
+
+    local wsName = bind.action;
+    if bind.actionType == 'macro' then
+        wsName = bind.recastSourceAction;
+    end
+
+    local tpCost = M.GetWeaponskillTpCost(wsName);
+    local party = AshitaCore:GetMemoryManager():GetParty();
+    local playerTp = party and party:GetMemberTP(0) or 0;
+    return playerTp >= tpCost;
+end
+
+--- Resolve macro recast source into a bind suitable for availability checks
+---@param bind table
+---@return table
+local function ResolveAvailabilityBind(bind)
+    if bind.actionType == 'macro' and bind.recastSourceType and bind.recastSourceType ~= 'none' then
+        return {
+            actionType = bind.recastSourceType,
+            action = bind.recastSourceAction,
+            itemId = bind.recastSourceItemId,
+            equipSlot = bind.equipSlot,
+        };
+    end
+    return bind;
+end
+
+--- Check if the player currently has a named ability or weaponskill
+---@param player table
+---@param actionName string
+---@param cacheFallback function|nil Fallback when ability ID lookup fails
+---@return boolean
+local function PlayerHasNamedAbility(player, actionName, cacheFallback)
+    local abilityId = actiondb.GetAbilityId(actionName);
+    if abilityId then
+        return player:HasAbility(abilityId);
+    end
+    return cacheFallback and cacheFallback(actionName) or false;
+end
+
 --- Check if an action is currently available to use
 --- Takes into account job, level, subjob, and level sync
 ---@param bind table The keybind data with actionType and action fields
@@ -393,6 +577,8 @@ end
 ---@return string|nil reason Reason if not available (e.g., "Level 50 required", "Wrong job")
 function M.IsActionAvailable(bind)
     if not bind then return true, nil; end
+
+    bind = ResolveAvailabilityBind(bind);
 
     local player = AshitaCore:GetMemoryManager():GetPlayer();
     if not player then return true, nil; end
@@ -408,8 +594,17 @@ function M.IsActionAvailable(bind)
         return true, "pending";  -- "pending" signals not to cache this result
     end
 
+    if bind.actionType == 'macro' then
+        return true, nil;
+    end
+
     -- Handle magic spells
     if bind.actionType == 'ma' then
+        local spellId = actiondb.GetSpellId(bind.action);
+        if spellId and not player:HasSpell(spellId) then
+            return false, "N/A";
+        end
+
         local spell = GetSpellByName(bind.action);
         if not spell then return true, nil; end  -- Unknown spell, assume available
 
@@ -446,20 +641,30 @@ function M.IsActionAvailable(bind)
             return false, "Job";
         end
 
-    -- Handle job abilities
+    -- Handle job abilities (live HasAbility reflects current job/gear state)
     elseif bind.actionType == 'ja' then
-        -- Use playerdata's cached abilities as single source of truth
-        -- This ensures availability matches what's shown in the dropdown
-        local playerdata = require('modules.hotbar.playerdata');
-        if not playerdata.IsAbilityInCache(bind.action) then
+        if not PlayerHasNamedAbility(player, bind.action, playerdata.IsAbilityInCache) then
             return false, "N/A";
         end
 
-    -- Handle weapon skills
+    -- Handle weapon skills (HasAbility reflects currently equipped weapon types)
     elseif bind.actionType == 'ws' then
-        -- Use playerdata's cached weaponskills as single source of truth
-        local playerdata = require('modules.hotbar.playerdata');
-        if not playerdata.IsWeaponskillInCache(bind.action) then
+        if not PlayerHasNamedAbility(player, bind.action, playerdata.IsWeaponskillInCache) then
+            return false, "N/A";
+        end
+
+    elseif bind.actionType == 'pet' then
+        if not playerdata.IsPetCommandAvailable(bind.action) then
+            return false, "N/A";
+        end
+
+    elseif bind.actionType == 'equip' then
+        if not playerdata.IsEquipActionAvailable(bind.equipSlot, bind.action, bind.itemId) then
+            return false, "N/A";
+        end
+
+    elseif bind.actionType == 'item' then
+        if not playerdata.IsItemInAccessibleInventory(bind.itemId, bind.action) then
             return false, "N/A";
         end
     end
@@ -577,6 +782,12 @@ function M.GetBindIcon(bind)
         return nil, nil;
     end
 
+    -- Negative cache: if we've already determined this bind has no icon, skip the lookups.
+    local noIconKey = buildNoIconKey(bind);
+    if noIconKey and noIconCache[noIconKey] then
+        return nil, nil;
+    end
+
     local icon = nil;
     local iconId = nil;
 
@@ -604,11 +815,13 @@ function M.GetBindIcon(bind)
                             if customIconCache[macro.customIconPath] then
                                 return customIconCache[macro.customIconPath], nil;
                             end
-                            local customDir = string.format('%saddons\\XIUI\\assets\\hotbar\\custom\\', AshitaCore:GetInstallPath());
-                            icon = textures:LoadTextureFromPath(customDir .. macro.customIconPath);
-                            if icon then
-                                customIconCache[macro.customIconPath] = icon;
-                                return icon, nil;
+                            local fullPath = TextureManager.ResolveCustomIconPath(macro.customIconPath);
+                            if fullPath then
+                                icon = textures:LoadTextureFromPath(fullPath);
+                                if icon then
+                                    customIconCache[macro.customIconPath] = icon;
+                                    return icon, nil;
+                                end
                             end
                         end
                     end
@@ -633,12 +846,14 @@ function M.GetBindIcon(bind)
             if customIconCache[bind.customIconPath] then
                 return customIconCache[bind.customIconPath], nil;
             end
-            -- Load custom icon from assets/hotbar/custom/ directory
-            local customDir = string.format('%saddons\\XIUI\\assets\\hotbar\\custom\\', AshitaCore:GetInstallPath());
-            icon = textures:LoadTextureFromPath(customDir .. bind.customIconPath);
-            if icon then
-                customIconCache[bind.customIconPath] = icon;
-                return icon, nil;
+            -- Resolve via TextureManager so submodule-prefixed paths route correctly
+            local fullPath = TextureManager.ResolveCustomIconPath(bind.customIconPath);
+            if fullPath then
+                icon = textures:LoadTextureFromPath(fullPath);
+                if icon then
+                    customIconCache[bind.customIconPath] = icon;
+                    return icon, nil;
+                end
             end
         end
     end
@@ -699,17 +914,7 @@ function M.GetBindIcon(bind)
             icon = textures:Get(otherIconKey);
             if icon then return icon, iconId; end
         end
-        -- Job ability - try to get from game resources
-        local resMgr = AshitaCore:GetResourceManager();
-        if resMgr then
-            for abilityId = 1, 1024 do
-                local ability = resMgr:GetAbilityById(abilityId);
-                if ability and ability.Name and ability.Name[1] == bind.action then
-                    iconId = abilityId;
-                    break;
-                end
-            end
-        end
+        -- No further icon source for generic job abilities; abbreviation fallback handles display.
     elseif bind.actionType == 'pet' then
         -- Check for pet command icons first
         local petIconKey = petCommandToIconKey[bind.action];
@@ -720,17 +925,7 @@ function M.GetBindIcon(bind)
             end
         end
     elseif bind.actionType == 'ws' then
-        -- Weaponskill - try to get from game resources
-        local resMgr = AshitaCore:GetResourceManager();
-        if resMgr then
-            for wsId = 1, 255 do
-                local ability = resMgr:GetAbilityById(wsId + 256);
-                if ability and ability.Name and ability.Name[1] == bind.action then
-                    iconId = wsId;
-                    break;
-                end
-            end
-        end
+        -- No icon source for weaponskills; abbreviation fallback handles display.
     elseif bind.actionType == 'item' or bind.actionType == 'equip' then
         -- Item or Equipment - load icon from game resources
         -- Use itemId if available (faster), otherwise fall back to name lookup
@@ -739,6 +934,12 @@ function M.GetBindIcon(bind)
         else
             icon = LoadItemIconByName(bind.action);
         end
+    end
+
+    -- Memoize negative results so future cache misses (after display.iconCache wipes)
+    -- skip the lookup work for binds that have no resolvable icon.
+    if not icon and noIconKey then
+        noIconCache[noIconKey] = true;
     end
 
     return icon, iconId;
@@ -840,11 +1041,440 @@ local function macroHasWait(lines)
     return false;
 end
 
+-- Slash commands that accept target arguments and can open subtarget selection UI
+local TARGETABLE_COMMANDS = {
+    ma = true,
+    magic = true,
+    ja = true,
+    jobability = true,
+    ws = true,
+    weaponskill = true,
+    ra = true,
+    ranged = true,
+    item = true,
+    pet = true,
+    ta = true,
+    target = true,
+    na = true,
+    ninjutsu = true,
+};
+
+--- Macro mode (2) is only for action commands that need native fallthrough.
+--- Other lines (/echo, etc.) use AshitaParse so literal <stpc> text in messages
+--- is not re-processed by the macro subtarget subsystem.
+local function getMacroCommandQueueMode(commandLine)
+    local cmd = commandLine:match('^/%s*(%S+)');
+    if cmd and TARGETABLE_COMMANDS[cmd:lower()] then
+        return 2;
+    end
+    return -1;
+end
+
+-- Subtarget tags that open the in-game selection UI (<lastst> excluded - reuses prior target)
+local SUBTARGET_TAGS = { 'stpc', 'stpt', 'stal', 'stnpc', 'st' };
+
+local function extractSubtargetTag(line)
+    local unquoted = line:gsub('"[^"]*"', '');
+    for _, tag in ipairs(SUBTARGET_TAGS) do
+        if unquoted:match('<' .. tag .. '>') then
+            return tag;
+        end
+    end
+    return nil;
+end
+
+--- Action command with an ST tag outside quotes (not /echo etc.).
+local function lineRequiresSubtargetPause(line)
+    local cmd = line:match('^/%s*(%S+)');
+    if not cmd or not TARGETABLE_COMMANDS[cmd:lower()] then
+        return false;
+    end
+    return extractSubtargetTag(line) ~= nil;
+end
+
+--- Check if any line in a macro opens subtarget selection
+--- @param lines table Array of command line strings
+--- @return boolean hasSubtarget True if any line requires a subtarget pause
+local function macroHasSubtarget(lines)
+    for _, line in ipairs(lines) do
+        if lineRequiresSubtargetPause(line) then
+            return true;
+        end
+    end
+    return false;
+end
+
+local SUBTARGET_POLL_INTERVAL = 0.05;
+local SUBTARGET_CHOICE_TIMEOUT_SEC = 30.0;
+local SUBTARGET_NO_OPEN_FALLTHROUGH_SEC = 1.0;
+local ST_PRETARGET_MAX_WAIT_SEC = 0.1;
+
+-- Ashita ST re-process modes (command event nType).
+local ST_TAG_MODES = {
+    st = 3, stpc = 4, stnpc = 5, stpt = 6, stal = 7,
+};
+
+-- Pre-target when main slot is empty so ST UI initializes reliably.
+local ST_PRETARGET_COMMANDS = {
+    stpc = '/target <me>',
+    stnpc = '/targetnpc',
+    st = '/target <me>',
+    stpt = '/target <me>',
+    stal = '/target <me>',
+};
+
+local pendingSubtargetWait = nil;
+
+local function shouldApplyStPreTarget(stTag)
+    return stTag ~= nil
+        and ST_PRETARGET_COMMANDS[stTag] ~= nil
+        and not targetLib.HasMainTarget();
+end
+
+local function queueStPreTarget(stTag)
+    local preTarget = ST_PRETARGET_COMMANDS[stTag];
+    if not preTarget then
+        return false;
+    end
+    local ok, err = pcall(function()
+        local chatManager = AshitaCore:GetChatManager();
+        if chatManager then
+            chatManager:QueueCommand(-1, preTarget);
+        end
+    end);
+    if not ok then
+        print('[XIUI] ST pre-target error: ' .. tostring(err));
+        return false;
+    end
+    SubtargetDebugLog(('ST pre-target queued for <%s>: %s'):format(stTag, preTarget));
+    return true;
+end
+
+local function runAfterStPreTarget(onReady, cancelCheck)
+    local deadline = os.clock() + ST_PRETARGET_MAX_WAIT_SEC;
+
+    local function poll()
+        if cancelCheck and cancelCheck() then
+            return;
+        end
+        if targetLib.HasMainTarget() then
+            onReady();
+            return;
+        end
+        if os.clock() >= deadline then
+            SubtargetDebugLog('ST pre-target wait timed out, continuing anyway');
+            onReady();
+            return;
+        end
+        ashita.tasks.once(0, poll);
+    end
+
+    ashita.tasks.once(0, poll);
+end
+
+local function isSubtargetMode(mode)
+    return mode ~= nil and mode >= 3 and mode <= 7;
+end
+
+--- ST re-processing mode (3-7) may appear on nType even when e.mode is still Macro (2).
+local function getSubtargetEventMode(e, nType)
+    if isSubtargetMode(nType) then
+        return nType;
+    end
+    if e ~= nil and isSubtargetMode(e.mode) then
+        return e.mode;
+    end
+    return nil;
+end
+
+local function normalizeCommand(cmd)
+    cmd = tostring(cmd or '');
+    return cmd:lower():gsub('%s+', ' '):match('^%s*(.-)%s*$') or '';
+end
+
+--- Strip <target> tokens so the confirm pass can match even if the tag changes.
+local function stripTargetTokens(cmd)
+    return normalizeCommand(cmd):gsub('<[^>]+>', ''):gsub('%s+', ' '):match('^%s*(.-)%s*$') or '';
+end
+
+local function getExpectedSubtargetMode(stTag)
+    if not stTag then
+        return nil;
+    end
+    return ST_TAG_MODES[stTag];
+end
+
+--- Match /ma "Cure" across both <stpc> and confirm passes like /ma "Cure" 3762.
+local function getCommandActionKey(cmd)
+    local norm = normalizeCommand(cmd);
+    local verb = norm:match('^(/%S+)');
+    local quoted = norm:match('"([^"]*)"');
+    if verb and quoted then
+        return verb .. ':"' .. quoted .. '"';
+    end
+    return stripTargetTokens(norm):gsub('%s+%d+$', '');
+end
+
+local function commandHasStTag(cmd, stTag)
+    if not cmd or not stTag then
+        return false;
+    end
+    return normalizeCommand(cmd):find('<' .. stTag .. '>', 1, true) ~= nil;
+end
+
+local function commandMatchesActionKey(wait, incomingCmd)
+    if not wait or not incomingCmd then
+        return false;
+    end
+    return getCommandActionKey(incomingCmd) == wait.actionKey;
+end
+
+local function isStActivationEvent(e, nType, wait)
+    if not commandMatchesActionKey(wait, e.command) then
+        return false;
+    end
+
+    local stMode = getSubtargetEventMode(e, nType);
+    if stMode == wait.expectedMode and commandHasStTag(e.command, wait.stTag) then
+        return true;
+    end
+
+    -- Initial forward before ST re-process (observed as Typed/Macro with tag still present).
+    if (e.mode == 1 or e.mode == 2) and commandHasStTag(e.command, wait.stTag) then
+        return true;
+    end
+
+    return false;
+end
+
+local function isStResolvedTargetPass(e, nType, wait)
+    if wait.stPassCount < 1 then
+        return false;
+    end
+
+    if getSubtargetEventMode(e, nType) ~= wait.expectedMode then
+        return false;
+    end
+
+    if not commandMatchesActionKey(wait, e.command) then
+        return false;
+    end
+
+    -- Resolved-target passes replace the tag with a concrete target (e.g. server id).
+    if commandHasStTag(e.command, wait.stTag) then
+        return false;
+    end
+
+    return true;
+end
+
+local function clearSubtargetWait(wait)
+    if wait == nil or pendingSubtargetWait == wait then
+        pendingSubtargetWait = nil;
+    end
+end
+
+local function finishSubtargetAdvance(wait, logMsg)
+    if not wait or wait.finished or pendingSubtargetWait ~= wait then
+        return;
+    end
+    wait.finished = true;
+    local onComplete = wait.onComplete;
+    local cancelCheck = wait.cancelCheck;
+    clearSubtargetWait(wait);
+
+    SubtargetDebugLog(logMsg);
+
+    ashita.tasks.once(0, function()
+        if cancelCheck and cancelCheck() then
+            return;
+        end
+        onComplete();
+    end);
+end
+
+local function finishSubtargetTimeout(wait)
+    if not wait or wait.finished or pendingSubtargetWait ~= wait then
+        return;
+    end
+    wait.finished = true;
+    local onAbort = wait.onAbort;
+    local cancelCheck = wait.cancelCheck;
+    clearSubtargetWait(wait);
+
+    SubtargetDebugLog('ST wait timed out, aborting macro');
+
+    if cancelCheck and cancelCheck() then
+        return;
+    end
+    if onAbort then
+        onAbort();
+    end
+end
+
+--- True while ST selection is open and the confirm pass has not arrived yet.
+local function isWaitingForStChoice(wait)
+    if wait.finished then
+        return false;
+    end
+    return wait.sawStOpen or wait.sawStActive;
+end
+
+--- ST selection closed without confirm (cancel / dismiss).
+local function isSubtargetDismissedWithoutConfirm(wait, stActive)
+    if not isWaitingForStChoice(wait) or stActive then
+        return false;
+    end
+    if targetLib.GetTargetDeactivate() then
+        return true;
+    end
+    return wait.sawStActive;
+end
+
+local function onSubtargetCommandEvent(e, nType)
+    local wait = pendingSubtargetWait;
+    if not wait or wait.finished then
+        return;
+    end
+
+    if wait.cancelCheck and wait.cancelCheck() then
+        wait.finished = true;
+        clearSubtargetWait(wait);
+        return;
+    end
+
+    local stMode = getSubtargetEventMode(e, nType);
+
+    SubtargetDebugLog(('ST cmd event e.mode=%s nType=%s stMode=%s expect=%s pass=%d resolved=%d st=%s: %s'):format(
+        tostring(e.mode),
+        tostring(nType),
+        tostring(stMode),
+        tostring(wait.expectedMode),
+        wait.stPassCount,
+        wait.resolvedPassCount or 0,
+        tostring(targetLib.GetSubTargetActive()),
+        tostring(e.command)
+    ));
+
+    if isStActivationEvent(e, nType, wait) and wait.stPassCount == 0 then
+        wait.stPassCount = 1;
+        SubtargetDebugLog('ST activation pass recorded');
+        return;
+    end
+
+    if not isStResolvedTargetPass(e, nType, wait) then
+        return;
+    end
+
+    if targetLib.GetSubTargetActive() then
+        wait.sawStActive = true;
+    end
+
+    if wait.resolvedPassCount == 0 then
+        wait.resolvedPassCount = 1;
+        wait.sawStOpen = true;
+        SubtargetDebugLog('ST open pass (cursor default) recorded');
+        return;
+    end
+
+    if not wait.sawStOpen then
+        SubtargetDebugLog('ST confirm pass ignored (no open pass yet)');
+        return;
+    end
+
+    wait.resolvedPassCount = 2;
+    SubtargetDebugLog('ST confirm pass matched');
+    finishSubtargetAdvance(wait, 'ST wait confirmed, advancing macro');
+end
+
+ashita.events.register('command', 'xiui_subtarget_cmd', function(e, nType)
+    onSubtargetCommandEvent(e, nType);
+end);
+
+--- Pause macro until ST confirm (2nd command pass) or dismiss. Both advance; timeout aborts.
+local function waitForSubtargetComplete(commandLine, onComplete, onAbort, cancelCheck)
+    local stTag = extractSubtargetTag(commandLine);
+    local expectedMode = getExpectedSubtargetMode(stTag);
+
+    pendingSubtargetWait = {
+        actionKey = getCommandActionKey(commandLine),
+        stTag = stTag,
+        expectedMode = expectedMode,
+        stPassCount = 0,
+        resolvedPassCount = 0,
+        sawStOpen = false,
+        sawStActive = false,
+        choiceDeadline = nil,
+        noOpenDeadline = os.clock() + SUBTARGET_NO_OPEN_FALLTHROUGH_SEC,
+        finished = false,
+        cancelCheck = cancelCheck,
+        onComplete = onComplete,
+        onAbort = onAbort,
+    };
+
+    local myWait = pendingSubtargetWait;
+
+    SubtargetDebugLog(('ST wait begin tag=%s expectMode=%s cmd=%s'):format(
+        tostring(stTag),
+        tostring(expectedMode),
+        commandLine
+    ));
+
+    local function poll()
+        if pendingSubtargetWait ~= myWait or myWait.finished then
+            return;
+        end
+
+        local wait = myWait;
+
+        if cancelCheck and cancelCheck() then
+            SubtargetDebugLog('ST wait superseded by newer macro');
+            myWait.finished = true;
+            clearSubtargetWait(myWait);
+            return;
+        end
+
+        local stActive = targetLib.GetSubTargetActive();
+        if stActive then
+            wait.sawStActive = true;
+        end
+
+        if isWaitingForStChoice(wait) then
+            if not wait.choiceDeadline then
+                wait.choiceDeadline = os.clock() + SUBTARGET_CHOICE_TIMEOUT_SEC;
+            end
+
+            if isSubtargetDismissedWithoutConfirm(wait, stActive) then
+                finishSubtargetAdvance(wait, 'ST wait ended (cancelled), advancing macro');
+                return;
+            end
+
+            if os.clock() >= wait.choiceDeadline then
+                finishSubtargetTimeout(wait);
+                return;
+            end
+
+            ashita.tasks.once(SUBTARGET_POLL_INTERVAL, poll);
+            return;
+        end
+
+        if os.clock() >= wait.noOpenDeadline then
+            finishSubtargetAdvance(wait, 'ST wait fallthrough (selection never opened)');
+            return;
+        end
+
+        ashita.tasks.once(SUBTARGET_POLL_INTERVAL, poll);
+    end
+
+    ashita.tasks.once(0, poll);
+end
+
 --- Execute a command string (handles multi-line macros with /wait support)
 --- Splits by newlines and executes each non-empty line in sequence
---- For macros WITHOUT waits: queues all lines synchronously using Macro mode (2)
---- so the game processes them as a native macro batch with fallthrough behavior.
---- For macros WITH waits: uses Ashita's task scheduler for proper delay handling.
+--- For macros WITHOUT waits or subtarget pauses: queues all lines synchronously using
+--- Macro mode (2) so the game processes them as a native macro batch with fallthrough.
+--- For macros WITH waits or subtarget lines: sequential execution via task scheduler.
+--- ST lines pause until confirm or dismiss (Ashita command events + target memory).
 --- Also handles inline <wait #> subcommands at end of command lines.
 --- @param commandText string The command text (may contain newlines)
 --- @param isMacro boolean|nil If true, enforces single-macro-at-a-time execution
@@ -870,17 +1500,22 @@ function M.ExecuteCommandString(commandText, isMacro)
 
     local myMacroId = nil;
     if isMacro then
+        -- Block new macros only while the game reports subtarget mode is active.
+        if targetLib.GetSubTargetActive() then
+            SubtargetDebugLog('Ignoring macro keypress while game subtarget mode is active');
+            return false;
+        end
         activeMacroId = activeMacroId + 1;
         myMacroId = activeMacroId;
     end
 
-    -- SYNCHRONOUS FAST PATH: For macros without any wait directives, queue all
+    -- SYNCHRONOUS FAST PATH: For macros without wait or subtarget directives, queue all
     -- lines in the same frame using mode 2 (Macro). This tells the game engine
     -- these commands come from the macro subsystem, enabling native fallthrough
     -- behavior where failed commands (e.g., wrong WS for equipped weapon) are
     -- skipped and the next line is tried automatically.
     -- NOTE: The game's macro command stack is LIFO, so we queue in reverse order.
-    if isMacro and not macroHasWait(lines) then
+    if isMacro and not macroHasWait(lines) and not macroHasSubtarget(lines) then
         local ok, err = pcall(function()
             local chatManager = AshitaCore:GetChatManager();
             if chatManager then
@@ -898,24 +1533,37 @@ function M.ExecuteCommandString(commandText, isMacro)
         return true;
     end
 
-    -- ASYNC PATH: For macros with wait directives or non-macro commands.
-    -- Recursive function to execute lines with proper /wait handling.
+    -- ASYNC PATH: For macros with wait/subtarget directives or non-macro commands.
+    -- Recursive function to execute lines with proper /wait and subtarget handling.
     -- This chains tasks instead of scheduling them all at once.
-    local function executeNextLine(index)
+    local function isMacroCancelled()
+        return myMacroId ~= nil and myMacroId ~= activeMacroId;
+    end
+
+    local executeNextLine;
+
+    local function scheduleNextLine(index, delay)
+        if index > #lines then
+            return;
+        end
+        ashita.tasks.once(delay or 0, function()
+            executeNextLine(index);
+        end);
+    end
+
+    executeNextLine = function(index)
         if index > #lines then
             return;
         end
 
         -- If this is a macro flow, bail out when a newer macro has started
-        if myMacroId and myMacroId ~= activeMacroId then
+        if isMacroCancelled() then
             return;
         end
 
         local line = lines[index]:match('^%s*(.-)%s*$');  -- Trim whitespace
         if line == '' then
-            ashita.tasks.once(0, function()
-                executeNextLine(index + 1);
-            end);
+            scheduleNextLine(index + 1, 0);
             return;
         end
 
@@ -927,35 +1575,56 @@ function M.ExecuteCommandString(commandText, isMacro)
         if waitMatch then
             -- It's a wait command - schedule the next line after the delay
             local delay = tonumber(waitMatch) or 1;
-            ashita.tasks.once(delay, function()
-                executeNextLine(index + 1);
-            end);
+            scheduleNextLine(index + 1, delay);
         else
             -- Parse inline <wait #> subcommand
             local commandToExecute, inlineWait = parseInlineWait(line);
+            local requiresSubtargetPause = lineRequiresSubtargetPause(commandToExecute);
 
             -- PROTECTED command execution
-            -- Use mode 2 (Macro) for macro flows to get native fallthrough,
-            -- mode -1 (AshitaParse) for non-macro single commands
-            local cmdMode = isMacro and 2 or -1;
-            local ok, err = pcall(function()
-                local chatManager = AshitaCore:GetChatManager();
-                if chatManager then
-                    chatManager:QueueCommand(cmdMode, commandToExecute);
+            -- Use mode 2 (Macro) for macro action commands to get native fallthrough,
+            -- mode -1 (AshitaParse) for /echo and other non-action lines
+            local cmdMode = isMacro and getMacroCommandQueueMode(commandToExecute) or -1;
+            local stTag = requiresSubtargetPause and extractSubtargetTag(commandToExecute) or nil;
+
+            local function queueActionLine()
+                if requiresSubtargetPause then
+                    waitForSubtargetComplete(commandToExecute, function()
+                        if index < #lines then
+                            scheduleNextLine(index + 1, inlineWait or 0);
+                        end
+                    end, function()
+                        if myMacroId == activeMacroId then
+                            activeMacroId = activeMacroId + 1;
+                        end
+                    end, isMacroCancelled);
                 end
-            end);
 
-            if not ok then
-                print('[XIUI] Command execution error: ' .. tostring(err));
-            end
-
-            -- Schedule next line with inline wait delay if found
-            if index < #lines then
-                local delay = inlineWait or 0;
-                ashita.tasks.once(delay, function()
-                    executeNextLine(index + 1);
+                local ok, err = pcall(function()
+                    local chatManager = AshitaCore:GetChatManager();
+                    if chatManager then
+                        chatManager:QueueCommand(cmdMode, commandToExecute);
+                    end
                 end);
+
+                if not ok then
+                    print('[XIUI] Command execution error: ' .. tostring(err));
+                end
+
+                if index < #lines and not requiresSubtargetPause then
+                    scheduleNextLine(index + 1, inlineWait or 0);
+                end
             end
+
+            local function executeCommandLine()
+                if stTag and shouldApplyStPreTarget(stTag) and queueStPreTarget(stTag) then
+                    runAfterStPreTarget(queueActionLine, isMacroCancelled);
+                    return;
+                end
+                queueActionLine();
+            end
+
+            executeCommandLine();
         end
     end
 
@@ -1220,6 +1889,13 @@ function M.ClearCustomIconCache()
     customIconCache = {};
 end
 
+-- Clear the negative-result cache. Must be called whenever something upstream
+-- could change icon resolution: macroDB edits, job/pet/palette changes, custom
+-- icon asset changes. Failing to clear it pins stale "no icon" decisions.
+function M.ClearNoIconCache()
+    noIconCache = {};
+end
+
 --- Set debug mode (called via /xiui debug hotbar)
 function M.SetDebugEnabled(enabled)
     SetDebugEnabled(enabled);
@@ -1228,6 +1904,16 @@ end
 --- Get debug mode state
 function M.IsDebugEnabled()
     return DEBUG_ENABLED;
+end
+
+--- Set subtarget debug mode (called via /xiui debug subtarget)
+function M.SetSubtargetDebugEnabled(enabled)
+    SetSubtargetDebugEnabled(enabled);
+end
+
+--- Get subtarget debug mode state
+function M.IsSubtargetDebugEnabled()
+    return DEBUG_SUBTARGET;
 end
 
 --- Set palette debug mode (called via /xiui debug palette)

@@ -1,7 +1,7 @@
 --[[
 * XIUI Crossbar - Display Module
 * Renders crossbar UI with controller-friendly layout
-* Uses windowBg for background, ImGui/imtext for text and icons
+* Uses windowBg.Draw (ImGui draw list) for background, ImGui/imtext for text and icons
 ]]--
 
 require('common');
@@ -9,6 +9,7 @@ require('handlers.helpers');
 local imgui = require('imgui');
 local ffi = require('ffi');
 local windowBg = require('libs.windowbackground');
+-- Note: windowBg is now an immediate-mode renderer; call windowBg.Draw() per frame.
 local drawing = require('libs.drawing');
 local imtext = require('libs.imtext');
 local dragdrop = require('libs.dragdrop');
@@ -234,7 +235,9 @@ local function BuildCrossbarBindKey(slotData)
     return (slotData.actionType or '') .. ':' .. (slotData.action or '') .. ':' .. (slotData.target or '') .. iconPart;
 end
 
--- Get cached icon for a crossbar slot, recompute only if bind changed
+-- Get cached icon (and precomputed abbreviation, when no icon) for a crossbar slot.
+-- Returns: icon, abbr, abbrW. Mirrors display.lua's GetCachedIcon shape so DrawSlot
+-- can skip GetActionAbbreviation + imtext.Measure per frame.
 local function GetCachedCrossbarIcon(comboMode, slotIndex, slotData)
     -- Use effective combo mode for cache key (Shared when shared expanded bar is enabled)
     comboMode = data.GetEffectiveComboModeForStorage and data.GetEffectiveComboModeForStorage(comboMode) or comboMode;
@@ -248,23 +251,29 @@ local function GetCachedCrossbarIcon(comboMode, slotIndex, slotData)
     -- Check if we have a valid cache entry for this bind
     local bindKey = BuildCrossbarBindKey(slotData);
     if cached and cached.bindKey == bindKey then
-        -- Cache hit - return icon even if nil (nil = no icon exists)
-        return cached.icon;
+        return cached.icon, cached.abbr, cached.abbrW;
     end
 
-    -- Cache miss - compute icon
+    -- Cache miss - compute icon and (when no icon) the abbreviation
     local icon = nil;
     if slotData and slotData.actionType then
         icon = actions.GetBindIcon(slotData);
+    end
+
+    local abbr, abbrW = nil, nil;
+    if not icon and slotData then
+        abbr, abbrW = slotrenderer.ComputeAbbreviation(slotData);
     end
 
     -- Store in cache
     iconCache[comboMode][slotIndex] = {
         bindKey = bindKey,
         icon = icon,
+        abbr = abbr,
+        abbrW = abbrW,
     };
 
-    return icon;
+    return icon, abbr, abbrW;
 end
 
 -- Clear crossbar icon cache
@@ -284,15 +293,9 @@ end
 local state = {
     initialized = false,
 
-    -- Window background
-    bgHandle = nil,
-
     -- Window position (updated by ImGui window)
     windowX = 0,
     windowY = 0,
-
-    -- Loaded theme
-    loadedBgTheme = nil,
 
     -- Animation state for bar transitions
     animation = {
@@ -338,11 +341,12 @@ end
 
 -- Calculate crossbar window dimensions based on settings
 local function GetCrossbarDimensions(settings)
-    local slotSize = settings.slotSize or 48;
-    local slotGapV = settings.slotGapV or 4;
-    local slotGapH = settings.slotGapH or 4;
-    local diamondSpacing = settings.diamondSpacing or 20;
-    local groupSpacing = settings.groupSpacing or 40;
+    local gs = (gConfig and gConfig.globalScale) or 1.0;
+    local slotSize = (settings.slotSize or 48) * gs;
+    local slotGapV = (settings.slotGapV or 4) * gs;
+    local slotGapH = (settings.slotGapH or 4) * gs;
+    local diamondSpacing = (settings.diamondSpacing or 20) * gs;
+    local groupSpacing = (settings.groupSpacing or 40) * gs;
 
     -- Calculate group dimensions using layout functions
     local groupWidth, groupHeight = CalculateGroupDimensions(slotSize, slotGapV, slotGapH, diamondSpacing);
@@ -556,11 +560,12 @@ end
 
 -- Get slot position within the crossbar window
 local function GetSlotPositionInWindow(side, slotIndex, windowX, windowY, settings)
-    local slotSize = settings.slotSize or 48;
-    local slotGapV = settings.slotGapV or 4;
-    local slotGapH = settings.slotGapH or 4;
-    local diamondSpacing = settings.diamondSpacing or 20;
-    local groupSpacing = settings.groupSpacing or 40;
+    local gs = (gConfig and gConfig.globalScale) or 1.0;
+    local slotSize = (settings.slotSize or 48) * gs;
+    local slotGapV = (settings.slotGapV or 4) * gs;
+    local slotGapH = (settings.slotGapH or 4) * gs;
+    local diamondSpacing = (settings.diamondSpacing or 20) * gs;
+    local groupSpacing = (settings.groupSpacing or 40) * gs;
 
     -- Calculate group width for positioning
     local groupWidth = CalculateGroupDimensions(slotSize, slotGapV, slotGapH, diamondSpacing);
@@ -586,24 +591,14 @@ end
 function M.Initialize(settings, moduleSettings)
     if state.initialized then return; end
 
-    -- Initial position - use saved position or default
-    local savedPos = gConfig and gConfig.hotbarCrossbarPosition;
-    if not savedPos and gConfig.crossbarWindowPosX and gConfig.crossbarWindowPosY then
-        savedPos = { x = gConfig.crossbarWindowPosX, y = gConfig.crossbarWindowPosY };
-    end
+    -- Initial position - use saved position from profile or default
+    local savedPos = gConfig and gConfig.windowPositions and gConfig.windowPositions['Crossbar'];
 
     local defaultX, defaultY = GetDefaultPosition(settings);
     state.windowX = savedPos and savedPos.x or defaultX;
     state.windowY = savedPos and savedPos.y or defaultY;
 
     local width, height, groupWidth, groupHeight = GetCrossbarDimensions(settings);
-
-    -- Create window background
-    local primData = moduleSettings and moduleSettings.prim_data or {};
-    state.bgHandle = windowBg.create(primData, settings.backgroundTheme, settings.bgScale, settings.borderScale);
-
-    -- Set loaded theme
-    state.loadedBgTheme = settings.backgroundTheme;
 
     state.initialized = true;
 end
@@ -695,8 +690,12 @@ local function DrawSlot(comboMode, slotIndex, x, y, slotSize, settings, isActive
     -- Get slot data
     local slotData = data.GetCrossbarSlotData(comboMode, slotIndex);
 
-    -- Get icon for this action (cached - only rebuilds when bind changes)
-    local icon = GetCachedCrossbarIcon(comboMode, slotIndex, slotData);
+    -- Get icon + cached abbreviation for this action (cached - only rebuilds when bind changes)
+    local icon, cachedAbbr, cachedAbbrW = GetCachedCrossbarIcon(comboMode, slotIndex, slotData);
+
+    -- Global UI scale (slotSize/x/y come in already scaled; we apply gs here to
+    -- font sizes and pixel offsets that come straight from settings).
+    local gs = (gConfig and gConfig.globalScale) or 1.0;
 
     -- Update reusable params table in-place
     local p = cbParams;
@@ -704,6 +703,8 @@ local function DrawSlot(comboMode, slotIndex, x, y, slotSize, settings, isActive
     p.y = drawY;
     p.size = slotSize;
     p.windowName = 'Crossbar';
+    p.cachedAbbr = cachedAbbr;
+    p.cachedAbbrW = cachedAbbrW;
     p.bind = slotData;
     p.icon = icon;
     p.slotBgColor = settings.slotBackgroundColor or 0x55000000;
@@ -713,22 +714,23 @@ local function DrawSlot(comboMode, slotIndex, x, y, slotSize, settings, isActive
     p.isPressed = isPressed and isActive;
     p.iconPressScale = iconPressScale;
     p.showMpCost = settings.showMpCost ~= false;
-    p.mpCostFontSize = settings.mpCostFontSize or 10;
+    p.mpCostFontSize = (settings.mpCostFontSize or 10) * gs;
     p.mpCostFontColor = settings.mpCostFontColor or 0xFFD4FF97;
     p.mpCostNoMpColor = settings.mpCostNoMpColor or 0xFFFF4444;
-    p.mpCostOffsetX = settings.mpCostOffsetX or 0;
-    p.mpCostOffsetY = settings.mpCostOffsetY or 0;
+    p.mpCostOffsetX = (settings.mpCostOffsetX or 0) * gs;
+    p.mpCostOffsetY = (settings.mpCostOffsetY or 0) * gs;
     p.showQuantity = settings.showQuantity ~= false;
-    p.quantityFontSize = settings.quantityFontSize or 10;
+    p.showStackQuantity = settings.showStackQuantity == true;
+    p.quantityFontSize = (settings.quantityFontSize or 10) * gs;
     p.quantityFontColor = settings.quantityFontColor or 0xFFFFFFFF;
-    p.quantityOffsetX = settings.quantityOffsetX or 0;
-    p.quantityOffsetY = settings.quantityOffsetY or 0;
+    p.quantityOffsetX = (settings.quantityOffsetX or 0) * gs;
+    p.quantityOffsetY = (settings.quantityOffsetY or 0) * gs;
     p.showLabel = settings.showActionLabels or false;
     p.labelText = slotData and (slotData.displayName or slotData.action or '') or '';
-    p.labelOffsetX = settings.actionLabelOffsetX or 0;
-    p.labelOffsetY = (settings.actionLabelOffsetY or 0) + 2;
-    p.labelFontSize = settings.labelFontSize or 10;
-    p.recastTimerFontSize = settings.recastTimerFontSize or 11;
+    p.labelOffsetX = (settings.actionLabelOffsetX or 0) * gs;
+    p.labelOffsetY = ((settings.actionLabelOffsetY or 0) + 2) * gs;
+    p.labelFontSize = (settings.labelFontSize or 10) * gs;
+    p.recastTimerFontSize = (settings.recastTimerFontSize or 11) * gs;
     p.recastTimerFontColor = settings.recastTimerFontColor or 0xFFFFFFFF;
     p.flashCooldownUnder5 = settings.flashCooldownUnder5 or false;
     p.useHHMMCooldownFormat = settings.useHHMMCooldownFormat or false;
@@ -759,13 +761,14 @@ local function DrawDiamondCenterIconsImGui(diamondType, groupX, groupY, settings
     animOpacity = animOpacity or 1.0;
     if animOpacity <= 0.01 then return; end
 
-    local slotSize = settings.slotSize or 48;
-    local slotGapV = settings.slotGapV or 4;
-    local slotGapH = settings.slotGapH or 4;
-    local diamondSpacing = settings.diamondSpacing or 20;
-    local iconSize = settings.buttonIconSize or 24;
-    local iconGapH = settings.buttonIconGapH or 2;
-    local iconGapV = settings.buttonIconGapV or 2;
+    local gs = (gConfig and gConfig.globalScale) or 1.0;
+    local slotSize = (settings.slotSize or 48) * gs;
+    local slotGapV = (settings.slotGapV or 4) * gs;
+    local slotGapH = (settings.slotGapH or 4) * gs;
+    local diamondSpacing = (settings.diamondSpacing or 20) * gs;
+    local iconSize = (settings.buttonIconSize or 24) * gs;
+    local iconGapH = (settings.buttonIconGapH or 2) * gs;
+    local iconGapV = (settings.buttonIconGapV or 2) * gs;
     local controllerTheme = settings.controllerTheme or 'Xbox';
 
     -- Get diamond center position using layout calculation
@@ -913,10 +916,11 @@ local function DrawComboText(activeCombo, centerX, topY, settings)
 
     if not comboText then return; end
 
-    -- Get font size and offsets from settings
-    local fontSize = settings.comboTextFontSize or 10;
-    local offsetX = settings.comboTextOffsetX or 0;
-    local offsetY = settings.comboTextOffsetY or 0;
+    -- Get font size and offsets from settings (scaled by globalScale)
+    local gs = (gConfig and gConfig.globalScale) or 1.0;
+    local fontSize = (settings.comboTextFontSize or 10) * gs;
+    local offsetX = (settings.comboTextOffsetX or 0) * gs;
+    local offsetY = (settings.comboTextOffsetY or 0) * gs;
 
     -- Draw centered text via imtext
     local drawList = GetUIDrawList();
@@ -943,9 +947,10 @@ local function DrawPaletteName(centerX, bottomY, settings)
     local total = palette.GetCrossbarPaletteCount(jobId, subjobId) or 1;
 
     local displayText = string.format('%s (%d/%d)', paletteName, index, total);
-    local fontSize = settings.paletteNameFontSize or 10;
-    local offsetX = settings.paletteNameOffsetX or 0;
-    local offsetY = settings.paletteNameOffsetY or 0;
+    local gs = (gConfig and gConfig.globalScale) or 1.0;
+    local fontSize = (settings.paletteNameFontSize or 10) * gs;
+    local offsetX = (settings.paletteNameOffsetX or 0) * gs;
+    local offsetY = (settings.paletteNameOffsetY or 0) * gs;
 
     local drawList = GetUIDrawList();
     if drawList then
@@ -1024,14 +1029,12 @@ end
 function M.DrawWindow(settings, moduleSettings)
     if not state.initialized then return; end
 
-    -- Update recast timers once per frame
-    recast.Update();
-
-    local slotSize = settings.slotSize or 48;
-    local slotGapV = settings.slotGapV or 4;
-    local slotGapH = settings.slotGapH or 4;
-    local diamondSpacing = settings.diamondSpacing or 20;
-    local groupSpacing = settings.groupSpacing or 40;
+    local gs = (gConfig and gConfig.globalScale) or 1.0;
+    local slotSize = (settings.slotSize or 48) * gs;
+    local slotGapV = (settings.slotGapV or 4) * gs;
+    local slotGapH = (settings.slotGapH or 4) * gs;
+    local diamondSpacing = (settings.diamondSpacing or 20) * gs;
+    local groupSpacing = (settings.groupSpacing or 40) * gs;
 
     -- Calculate dimensions using layout functions
     local width, height, groupWidth, groupHeight = GetCrossbarDimensions(settings);
@@ -1051,20 +1054,6 @@ function M.DrawWindow(settings, moduleSettings)
     else
         -- Apply saved position (once) or default
         local hasSaved = gConfig.windowPositions and gConfig.windowPositions[windowName];
-        
-        -- Migration: Check for legacy position if not found in standard system
-        if not hasSaved then
-            local legPos = gConfig.hotbarCrossbarPosition;
-            if not legPos and gConfig.crossbarWindowPosX and gConfig.crossbarWindowPosY then
-                legPos = { x = gConfig.crossbarWindowPosX, y = gConfig.crossbarWindowPosY };
-            end
-            
-            if legPos then
-                if not gConfig.windowPositions then gConfig.windowPositions = {}; end
-                gConfig.windowPositions[windowName] = { x = legPos.x, y = legPos.y };
-                hasSaved = true;
-            end
-        end
 
         if hasSaved then
             ApplyWindowPosition(windowName);
@@ -1201,7 +1190,7 @@ function M.DrawWindow(settings, moduleSettings)
         SaveWindowPosition('Crossbar');
         windowPosX, windowPosY = imgui.GetWindowPos();
 
-        -- Update stored position 
+        -- Update stored position
         state.windowX = windowPosX;
         state.windowY = windowPosY;
 
@@ -1214,6 +1203,26 @@ function M.DrawWindow(settings, moduleSettings)
         -- Draw bar sets based on animation state and display mode
         -- NOTE: DrawSlot calls must be inside imgui.Begin/End for interactions to work
         local isActiveOnlyMode = settings.displayMode == 'activeOnly' and not isEditMode;
+
+        -- Draw window background FIRST so it sits beneath all slot content on the draw list.
+        -- In activeOnly mode, apply visibility opacity to background.
+        do
+            local bgOpacity = settings.backgroundOpacity;
+            local borderOpacity = settings.borderOpacity;
+            if isActiveOnlyMode then
+                bgOpacity = bgOpacity * visibilityOpacity;
+                borderOpacity = borderOpacity * visibilityOpacity;
+            end
+            windowBg.Draw(GetUIDrawList(), state.windowX, state.windowY, width, height, {
+                theme = settings.backgroundTheme,
+                bgScale = settings.bgScale,
+                borderScale = settings.borderScale,
+                bgOpacity = bgOpacity,
+                borderOpacity = borderOpacity,
+                bgColor = settings.bgColor,
+                borderColor = settings.borderColor,
+            });
+        end
 
         if state.animation.active then
             -- Get animation values for outgoing and incoming elements
@@ -1314,26 +1323,6 @@ function M.DrawWindow(settings, moduleSettings)
     local isActiveOnlyMode = settings.displayMode == 'activeOnly' and not isEditMode;
     local showCenterElements = not isActiveOnlyMode;
 
-    -- Update window background (can happen after window closes)
-    -- In activeOnly mode, apply visibility opacity to background
-    if state.bgHandle then
-        local bgOpacity = settings.backgroundOpacity;
-        local borderOpacity = settings.borderOpacity;
-        if isActiveOnlyMode then
-            bgOpacity = bgOpacity * visibilityOpacity;
-            borderOpacity = borderOpacity * visibilityOpacity;
-        end
-        windowBg.update(state.bgHandle, state.windowX, state.windowY, width, height, {
-            theme = settings.backgroundTheme,
-            bgScale = settings.bgScale,
-            borderScale = settings.borderScale,
-            bgOpacity = bgOpacity,
-            borderOpacity = borderOpacity,
-            bgColor = settings.bgColor,
-            borderColor = settings.borderColor,
-        });
-    end
-
     -- Draw center divider (optional, hidden in activeOnly mode)
     if settings.showDivider and drawList and showCenterElements then
         local dividerX = state.windowX + groupWidth + (groupSpacing / 2);
@@ -1399,13 +1388,6 @@ end
 -- ============================================
 
 function M.SetHidden(hidden)
-    -- Hide window background
-    if state.bgHandle then
-        if hidden then
-            windowBg.hide(state.bgHandle);
-        end
-        -- Note: Don't show bgHandle here - DrawWindow handles showing it after positioning
-    end
 end
 
 -- ============================================
@@ -1415,19 +1397,14 @@ end
 function M.UpdateVisuals(settings, moduleSettings)
     if not state.initialized then return; end
 
-    -- Update theme if changed
-    if settings.backgroundTheme ~= state.loadedBgTheme then
-        if state.bgHandle then
-            windowBg.setTheme(state.bgHandle, settings.backgroundTheme, settings.bgScale, settings.borderScale);
-        end
-        state.loadedBgTheme = settings.backgroundTheme;
-    end
-
     -- Reset imtext so it reloads fonts on next draw
     imtext.Reset();
 
     -- Clear slot cache so text re-renders with new settings
     slotrenderer.ClearAllCache();
+
+    -- Drop cached abbreviation widths (depend on the active font) so they re-measure.
+    ClearCrossbarIconCache();
 end
 
 -- ============================================
@@ -1436,12 +1413,6 @@ end
 
 function M.Cleanup()
     if not state.initialized then return; end
-
-    -- Destroy window background
-    if state.bgHandle then
-        windowBg.destroy(state.bgHandle);
-        state.bgHandle = nil;
-    end
 
     -- Clear icon cache
     ClearCrossbarIconCache();
@@ -1510,6 +1481,12 @@ function M.ResetPositions()
     local defaultX, defaultY = GetDefaultPosition(settings);
     state.windowX = defaultX;
     state.windowY = defaultY;
+    if gConfig.windowPositions then
+        gConfig.windowPositions['Crossbar'] = { x = defaultX, y = defaultY };
+    end
+    if gConfig.appliedPositions then
+        gConfig.appliedPositions['Crossbar'] = nil;
+    end
 end
 
 return M;

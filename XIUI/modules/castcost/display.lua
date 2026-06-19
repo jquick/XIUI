@@ -14,9 +14,6 @@ local defaultPositions = require('libs.defaultpositions');
 
 local M = {};
 
--- Background handle
-local bgHandle;
-
 -- Reference height cache keyed by fontSize to avoid re-measuring every frame
 local refHeightCache = {};
 local REF_STRING = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
@@ -37,20 +34,11 @@ local windowState = {
     height = nil,
 };
 
--- Position saving state
-local hasAppliedSavedPosition = false;
-local lastSavedPosX = nil;
-local lastSavedPosY = nil;
-local forcePositionReset = false;
-
 -- ============================================
 -- Initialization
 -- ============================================
 
 function M.Initialize(settings)
-    -- Create window background (read scale directly from gConfig like partylist does)
-    local cc = gConfig.castCost or {};
-    bgHandle = windowBg.create(settings.prim_data, cc.backgroundTheme or 'Window1', cc.bgScale or 1.0, cc.borderScale or 1.0);
 end
 
 -- ============================================
@@ -60,12 +48,6 @@ end
 function M.UpdateVisuals(settings)
     imtext.Reset();
     refHeightCache = {};
-
-    -- Update background theme (read scale directly from gConfig like partylist does)
-    local cc = gConfig.castCost or {};
-    if bgHandle then
-        windowBg.setTheme(bgHandle, cc.backgroundTheme or 'Window1', cc.bgScale or 1.0, cc.borderScale or 1.0);
-    end
 end
 
 -- ============================================
@@ -73,9 +55,6 @@ end
 -- ============================================
 
 function M.SetHidden(hidden)
-    if bgHandle then
-        windowBg.hide(bgHandle);
-    end
     -- Reset window state when hidden so bottom alignment starts fresh
     if hidden then
         windowState.x = nil;
@@ -91,10 +70,6 @@ end
 -- ============================================
 
 function M.Cleanup()
-    if bgHandle then
-        windowBg.destroy(bgHandle);
-        bgHandle = nil;
-    end
 end
 
 -- ============================================
@@ -131,9 +106,6 @@ end
 
 function M.Render(itemInfo, itemType, settings, colors)
     if itemInfo == nil then
-        if bgHandle then
-            windowBg.hide(bgHandle);
-        end
         -- Clear shared state when no selection
         shared.Clear();
         return;
@@ -316,23 +288,21 @@ function M.Render(itemInfo, itemType, settings, colors)
         -- Create dummy for dragging
         imgui.Dummy({ contentWidth, contentHeight });
 
-        -- Update background (read scale directly from gConfig like partylist does)
+        -- Draw background + borders (read scale directly from gConfig like partylist does)
         local cc = gConfig.castCost or {};
-        if bgHandle then
-            windowBg.update(bgHandle, cursorX, cursorY, contentWidth, contentHeight, {
-                theme = cc.backgroundTheme or 'Window1',
-                padding = padding,
-                paddingY = paddingY,
-                bgScale = cc.bgScale or 1.0,
-                borderScale = cc.borderScale or 1.0,
-                bgOpacity = cc.backgroundOpacity or 1.0,
-                bgColor = colors.bgColor or 0xFFFFFFFF,
-                borderSize = settings.borderSize or 21,
-                bgOffset = settings.bgOffset or 1,
-                borderOpacity = cc.borderOpacity or 1.0,
-                borderColor = colors.borderColor or 0xFFFFFFFF,
-            });
-        end
+        windowBg.Draw(drawList, cursorX, cursorY, contentWidth, contentHeight, {
+            theme = cc.backgroundTheme or 'Window1',
+            padding = padding,
+            paddingY = paddingY,
+            bgScale = cc.bgScale or 1.0,
+            borderScale = cc.borderScale or 1.0,
+            bgOpacity = cc.backgroundOpacity or 1.0,
+            bgColor = colors.bgColor or 0xFFFFFFFF,
+            borderSize = settings.borderSize or 21,
+            bgOffset = settings.bgOffset or 1,
+            borderOpacity = cc.borderOpacity or 1.0,
+            borderColor = colors.borderColor or 0xFFFFFFFF,
+        });
 
         -- Position and render text using reference heights for consistent spacing
         local yPos = cursorY;
@@ -413,15 +383,14 @@ function M.Render(itemInfo, itemType, settings, colors)
                 -- Center bar vertically within cooldownRowHeight
                 local barYOffset = (cooldownRowHeight - barHeight) / 2;
 
-                -- Draw the progress bar using the progressbar library
-                local pbDrawList = imgui.GetWindowDrawList();
+                -- Reuse the UI draw list so the bar isn't hidden behind the window bg.
                 progressbar.ProgressBar(
                     {{cooldownPercent, barGradient}},
                     {barWidth, barHeight},
                     {
                         absolutePosition = {barStartX, yPos + barYOffset},
                         decorate = false,
-                        drawList = pbDrawList,
+                        drawList = drawList,
                     }
                 );
             elseif isWeaponSkill and not hasEnoughTp then
@@ -444,7 +413,16 @@ function M.Render(itemInfo, itemType, settings, colors)
             local winPosX, winPosY = imgui.GetWindowPos();
             local totalHeight = contentHeight + (paddingY * 2);
 
-            if windowState.height ~= nil and windowState.height ~= totalHeight then
+            -- Detect external position change (forced reset, user drag, etc.)
+            local positionChanged = windowState.y ~= nil and windowState.y ~= winPosY;
+
+            if positionJustApplied or positionChanged then
+                -- Position was externally moved; clear tracking so height adjustment
+                -- doesn't fire until state is re-established on the next frame
+                windowState.x = nil;
+                windowState.y = nil;
+                windowState.height = nil;
+            elseif windowState.height ~= nil and windowState.height ~= totalHeight then
                 -- Height changed, adjust Y to keep bottom edge fixed
                 local newPosY = windowState.y + windowState.height - totalHeight;
                 imgui.SetWindowPos('CastCost', { winPosX, newPosY });
@@ -474,13 +452,19 @@ function M.Render(itemInfo, itemType, settings, colors)
                 lastSavedPosY = winPosY;
             end
         end
+
     end
     imgui.End();
 end
 
 M.ResetPositions = function()
-    forcePositionReset = true;
-    hasAppliedSavedPosition = false;
+    local defX, defY = defaultPositions.GetCastCostPosition();
+    if gConfig.windowPositions then
+        gConfig.windowPositions['CastCost'] = { x = defX, y = defY };
+    end
+    if gConfig.appliedPositions then
+        gConfig.appliedPositions['CastCost'] = nil;
+    end
 end
 
 return M;

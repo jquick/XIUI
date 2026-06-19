@@ -146,12 +146,9 @@ local function DrawPetTypeVisualSettings(configKey, petTypeLabel)
         imgui.ShowHelp('Always show the pet bar (recast timers) even when no pet is present.');
         imgui.Spacing();
 
-        -- Charmed pets don't have levels, so hide this option for Charm
-        if configKey ~= 'petBarCharm' then
-            components.DrawPartyCheckbox(typeSettings, 'Show Pet Level##' .. configKey, 'showLevel');
-            imgui.ShowHelp('Show pet level before the name (e.g., "Lv.35 FunguarFamiliar").');
-            imgui.Spacing();
-        end
+        components.DrawPartyCheckbox(typeSettings, 'Show Pet Level##' .. configKey, 'showLevel');
+        imgui.ShowHelp('Show pet level before the name (e.g., "Lv.35 FunguarFamiliar").');
+        imgui.Spacing();
 
         components.DrawPartyCheckbox(typeSettings, 'Align Bottom##' .. configKey, 'alignBottom');
         imgui.ShowHelp('Anchor the pet bar to its bottom edge. When the window height changes, it expands upward.');
@@ -1048,8 +1045,7 @@ end
 -- Helper: Draw Pet Bar specific settings (used in tab)
 local function DrawPetBarSettingsContent()
     components.DrawCheckbox('Enabled', 'showPetBar', CheckVisibility);
-    components.DrawCheckbox('Hide When Menu Open', 'petBarHideOnMenuFocus');
-    imgui.ShowHelp('Hide this module when a game menu is open (equipment, map, etc.).');
+    components.DrawHideWhenMenuOpenOptions('petBarHideOnMenuFocus', 'petBarHideMacroPalette');
     components.DrawCheckbox('Hide During Events', 'petBarHideDuringEvents');
     components.DrawCheckbox('Preview Mode', 'petBarPreview');
     imgui.ShowHelp('Show the pet bar with mock data. Preview shows the pet type from the selected tab below.');
@@ -1216,6 +1212,10 @@ local function DrawPetTargetSettingsContent()
             DeferredUpdateVisuals();
         end);
         imgui.ShowHelp('Select the background window theme for pet target. Uses Pet Bar theme by default.');
+        components.DrawSlider('Background Scale##petTargetBg', 'petTargetBgScale', 0.1, 3.0, '%.2f');
+        imgui.ShowHelp('Scale of the background texture.');
+        components.DrawSlider('Border Scale##petTargetBg', 'petTargetBorderScale', 0.1, 3.0, '%.2f');
+        imgui.ShowHelp('Scale of the window borders (Window themes only).');
         components.DrawSlider('Background Opacity##petTargetBg', 'petTargetBackgroundOpacity', 0.0, 1.0, '%.2f');
         imgui.ShowHelp('Opacity of the background. Uses Pet Bar opacity by default.');
         components.DrawSlider('Border Opacity##petTargetBg', 'petTargetBorderOpacity', 0.0, 1.0, '%.2f');

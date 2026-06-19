@@ -242,20 +242,6 @@ playerbar.DrawWindow = function(settings)
 	playerbar.interpolation.lastFrameTime = currentTime;
 
 	-- Draw the player window
-	-- Handle position reset or restore
-	if forcePositionReset then
-		local defX, defY = defaultPositions.GetPlayerBarPosition();
-		imgui.SetNextWindowPos({defX, defY}, ImGuiCond_Always);
-		forcePositionReset = false;
-		hasAppliedSavedPosition = true;
-		lastSavedPosX, lastSavedPosY = defX, defY;
-	elseif not hasAppliedSavedPosition and gConfig.playerBarWindowPosX ~= nil then
-		imgui.SetNextWindowPos({gConfig.playerBarWindowPosX, gConfig.playerBarWindowPosY}, ImGuiCond_Once);
-		hasAppliedSavedPosition = true;
-		lastSavedPosX = gConfig.playerBarWindowPosX;
-		lastSavedPosY = gConfig.playerBarWindowPosY;
-	end
-
 	-- Get base window flags with NoMove dynamically added if positions are locked
 	local windowFlags = GetBaseWindowFlags(gConfig.lockPositions);
     ApplyWindowPosition('PlayerBar');
@@ -341,7 +327,7 @@ playerbar.DrawWindow = function(settings)
 
 		-- Capture HP bar start position
 		local hpBarStartX, hpBarStartY = imgui.GetCursorScreenPos();
-		progressbar.ProgressBar(hpPercentData, {barSize, settings.barHeight}, {decorate = gConfig.showPlayerBarBookends});
+		progressbar.ProgressBar(hpPercentData, {barSize, settings.barHeight}, {decorate = gConfig.showPlayerBarBookends, drawList = drawList});
 
 		-- Draw resting ticker shimmer if enabled and player is resting
 		if gConfig.playerBarRestingTicker and playerEnt.Status == 33 then
@@ -363,8 +349,8 @@ playerbar.DrawWindow = function(settings)
 			local width = barSize - shimmerBookendWidth * 2 - (padding * 2);
 			local waveWidth = width * 0.06;
 			local x = hpBarStartX + shimmerBookendWidth + padding;
-			local y1 = hpBarStartY + padding;
-			local y2 = hpBarStartY + settings.barHeight - padding;
+			local y1 = hpBarStartY;
+			local y2 = hpBarStartY + settings.barHeight;
 			local waveLeft = x + (progress * (width - waveWidth));
 			local waveRight = waveLeft + waveWidth;
 			
@@ -372,7 +358,7 @@ playerbar.DrawWindow = function(settings)
 			local tickerColor = gConfig.colorCustomization.playerBar.restingTickerColor or 0xFF00E6FF;
 			local tickerRGBA = ARGBToImGui(tickerColor);
 			local r, g, b, a = tickerRGBA[1], tickerRGBA[2], tickerRGBA[3], tickerRGBA[4];
-			imgui.GetWindowDrawList():AddRectFilledMultiColor(
+			drawList:AddRectFilledMultiColor(
 				{waveLeft, y1}, {waveRight, y2},
 				imgui.GetColorU32({r, g, b, 0.0}),
 				imgui.GetColorU32({r, g, b, a}),
@@ -451,7 +437,7 @@ playerbar.DrawWindow = function(settings)
 				mpPercentData = {{SelfMPPercent / 100, mpGradient}};
 			end
 
-			progressbar.ProgressBar(mpPercentData, {barSize, settings.barHeight}, {decorate = gConfig.showPlayerBarBookends});
+			progressbar.ProgressBar(mpPercentData, {barSize, settings.barHeight}, {decorate = gConfig.showPlayerBarBookends, drawList = drawList});
 			imgui.SameLine();
 		end
 
@@ -504,9 +490,16 @@ playerbar.DrawWindow = function(settings)
 			mainPercent = SelfTP / 1000;
 		end
 
-		progressbar.ProgressBar({{mainPercent, tpGradient}}, {barSize, settings.barHeight}, {overlayBar=tpOverlay, decorate = gConfig.showPlayerBarBookends});
+		progressbar.ProgressBar({{mainPercent, tpGradient}}, {barSize, settings.barHeight}, {overlayBar=tpOverlay, decorate = gConfig.showPlayerBarBookends, drawList = drawList});
 
 		imgui.SameLine();
+
+		-- Bar borders draw outside the requested barHeight; shift text below to clear them.
+		local barBorderExtent;
+		do
+			local t = gConfig.barBorderThickness or 1;
+			barBorderExtent = (t > 0) and (t / 2 + 0.5) or 0;
+		end
 
 		-- Draw HP text
 		local hpDisplayMode = gConfig.playerBarHpDisplayMode or 'number';
@@ -535,9 +528,10 @@ playerbar.DrawWindow = function(settings)
 		else -- right alignment (default)
 			hpTextX = hpBarStartX + barSize - bookendWidth - textPadding - hpTextW;
 		end
-		-- Apply user offset
-		hpTextX = hpTextX + (gConfig.playerBarHpTextOffsetX or 0);
-		local hpTextY = hpBarStartY + settings.barHeight + settings.textYOffset + (gConfig.playerBarHpTextOffsetY or 0);
+		-- Apply user offset (scaled by global UI scale)
+		local gs = gConfig.globalScale or 1.0;
+		hpTextX = hpTextX + (gConfig.playerBarHpTextOffsetX or 0) * gs;
+		local hpTextY = hpBarStartY + settings.barHeight + barBorderExtent + settings.textYOffset + (gConfig.playerBarHpTextOffsetY or 0) * gs;
 		imtext.Draw(drawList, hpDisplayText, hpTextX, hpTextY, gConfig.colorCustomization.playerBar.hpTextColor, fontSize);
 
 		if (bShowMp) then
@@ -568,9 +562,9 @@ playerbar.DrawWindow = function(settings)
 			else -- right alignment (default)
 				mpTextX = mpBarStartX + barSize - bookendWidth - textPadding - mpTextW;
 			end
-			-- Apply user offset
-			mpTextX = mpTextX + (gConfig.playerBarMpTextOffsetX or 0);
-			local mpTextY = mpBarStartY + settings.barHeight + settings.textYOffset + (gConfig.playerBarMpTextOffsetY or 0);
+			-- Apply user offset (scaled by global UI scale)
+			mpTextX = mpTextX + (gConfig.playerBarMpTextOffsetX or 0) * gs;
+			local mpTextY = mpBarStartY + settings.barHeight + barBorderExtent + settings.textYOffset + (gConfig.playerBarMpTextOffsetY or 0) * gs;
 			imtext.Draw(drawList, mpDisplayText, mpTextX, mpTextY, gConfig.colorCustomization.playerBar.mpTextColor, fontSize);
 		end
 
@@ -587,9 +581,9 @@ playerbar.DrawWindow = function(settings)
 		else -- right alignment (default)
 			tpTextX = tpBarStartX + barSize - bookendWidth - textPadding - tpTextW;
 		end
-		-- Apply user offset
-		tpTextX = tpTextX + (gConfig.playerBarTpTextOffsetX or 0);
-		local tpTextY = tpBarStartY + settings.barHeight + settings.textYOffset + (gConfig.playerBarTpTextOffsetY or 0);
+		-- Apply user offset (scaled by global UI scale)
+		tpTextX = tpTextX + (gConfig.playerBarTpTextOffsetX or 0) * gs;
+		local tpTextY = tpBarStartY + settings.barHeight + barBorderExtent + settings.textYOffset + (gConfig.playerBarTpTextOffsetY or 0) * gs;
 		local tpTextColor = (SelfTP >= 1000) and gConfig.colorCustomization.playerBar.tpFullTextColor or gConfig.colorCustomization.playerBar.tpEmptyTextColor;
 		imtext.Draw(drawList, tpDisplayText, tpTextX, tpTextY, tpTextColor, fontSize);
 
@@ -627,8 +621,13 @@ playerbar.Cleanup = function()
 end
 
 playerbar.ResetPositions = function()
-	forcePositionReset = true;
-	hasAppliedSavedPosition = false;
+	local defX, defY = defaultPositions.GetPlayerBarPosition();
+	if gConfig.windowPositions then
+		gConfig.windowPositions['PlayerBar'] = { x = defX, y = defY };
+	end
+	if gConfig.appliedPositions then
+		gConfig.appliedPositions['PlayerBar'] = nil;
+	end
 end
 
 return playerbar;

@@ -35,7 +35,6 @@
 
 require('common');
 require('handlers.helpers');
-local windowBg = require('libs.windowbackground');
 local dragdrop = require('libs.dragdrop');
 local imtext = require('libs.imtext');
 
@@ -76,6 +75,28 @@ M.visible = true;
 -- Track hotbar enable/disable state for transitions
 local wasHotbarEnabled = nil;
 
+-- True if any hotbar bar or crossbar combo-mode has petAware enabled.
+-- Used to short-circuit the pet-change callback's cache wipes when no
+-- bar would actually rebind its slots in response.
+local function AnyBarIsPetAware()
+    for barIndex = 1, data.NUM_BARS do
+        local barSettings = data.GetBarSettings(barIndex);
+        if barSettings and barSettings.petAware then
+            return true;
+        end
+    end
+    local crossbarConfig = gConfig and gConfig.hotbarCrossbar;
+    local modeSettings = crossbarConfig and crossbarConfig.comboModeSettings;
+    if modeSettings then
+        for _, mode in pairs(modeSettings) do
+            if mode and mode.petAware then
+                return true;
+            end
+        end
+    end
+    return false;
+end
+
 -- ============================================
 -- Module Lifecycle
 -- ============================================
@@ -88,11 +109,6 @@ function M.Initialize(settings)
     if gConfig then
         gConfig.hotbarPreview = false;
         if gConfig.hotbarEnabled == nil then gConfig.hotbarEnabled = true; end
-
-        -- Per-bar position defaults
-        if gConfig.hotbarBarPositions == nil then
-            gConfig.hotbarBarPositions = {};
-        end
     end
 
     -- Initialize data module (sets player job)
@@ -109,6 +125,7 @@ function M.Initialize(settings)
             macropalette.SyncToCurrentJob();
             display.ClearIconCache();
             slotrenderer.ClearAllCache();
+            actions.ClearNoIconCache();
             if crossbarInitialized then
                 crossbar.ClearIconCache();
             end
@@ -129,35 +146,30 @@ function M.Initialize(settings)
         end);
     end
 
-    -- Create background primitives for each bar
-    local primData = {
-        visible = false,
-        can_focus = false,
-        locked = true,
-        width = 100,
-        height = 100,
-    };
-
-    for barIndex = 1, data.NUM_BARS do
-        -- Get per-bar settings
-        local barSettings = data.GetBarSettings(barIndex);
-        local bgTheme = barSettings.backgroundTheme or '-None-';
-        local bgScale = barSettings.bgScale or 1.0;
-        local borderScale = barSettings.borderScale or 1.0;
-
-        data.bgHandles[barIndex] = windowBg.create(primData, bgTheme, bgScale, borderScale);
-    end
-
     -- Initialize display layer
     display.Initialize(settings);
 
-    -- Register pet change callback to clear slot caches
+    -- Register pet change callback to clear slot caches.
+    --
+    -- The wipes here are global (every hotbar slot, every crossbar slot,
+    -- macro palette pet commands). They're only meaningful for bars that
+    -- actually swap content on pet change — i.e. bars with petAware set.
+    -- If nothing on screen consumes pet state, summoning/releasing a pet
+    -- has no visible effect, and rebuilding every cache afterwards is pure
+    -- waste. The cost shows up most when another addon is also reacting
+    -- to combat traffic and the frame budget is tight.
     petpalette.OnPetChanged(function(oldPetKey, newPetKey)
-        -- Invalidate storage key cache (pet change affects storage keys)
+        -- Storage key cache is cheap to flip and is the only invalidation
+        -- whose absence could leave a bar showing pet-keyed slots after the
+        -- user toggled petAware off mid-pet. Always run it.
         data.InvalidateStorageKeyCache();
+
+        if not AnyBarIsPetAware() then return; end
+
         -- Clear ALL caches when pet changes to force full refresh
         slotrenderer.ClearAllCache();
         display.ClearIconCache();
+        actions.ClearNoIconCache();
         if crossbarInitialized then
             crossbar.ClearIconCache();
         end
@@ -383,13 +395,6 @@ end
 -- Set module visibility
 function M.SetHidden(hidden)
     M.visible = not hidden;
-    if hidden then
-        for barIndex = 1, data.NUM_BARS do
-            if data.bgHandles[barIndex] then
-                windowBg.hide(data.bgHandles[barIndex]);
-            end
-        end
-    end
     display.SetHidden(hidden);
     if crossbarInitialized then
         crossbar.SetHidden(hidden);
@@ -402,13 +407,6 @@ function M.Cleanup()
 
     -- Flush any pending slot saves before cleanup
     macropalette.FlushPendingSave();
-
-    for barIndex = 1, data.NUM_BARS do
-        -- Destroy background
-        if data.bgHandles[barIndex] then
-            windowBg.destroy(data.bgHandles[barIndex]);
-        end
-    end
 
     -- Cleanup display and data layers
     display.Cleanup();
@@ -435,6 +433,8 @@ end
 -- ============================================
 
 function M.HandleZonePacket()
+    -- Flush any pending macro/slot saves before zone transition
+    macropalette.FlushPendingSave();
     data.Clear();
     petpalette.ClearPetState();
     -- Clear availability cache since player state is invalid during zone
@@ -451,6 +451,7 @@ function M.HandleJobChangePacket(e)
             macropalette.SyncToCurrentJob();
             palette.ValidatePalettesForJob(data.jobId, data.subjobId);
             display.ClearIconCache();
+            actions.ClearNoIconCache();
             if crossbarInitialized then
                 crossbar.ClearIconCache();
             end
@@ -588,9 +589,21 @@ function M.SetDebugEnabled(enabled)
     print('[XIUI] Hotbar debug mode: ' .. state);
 end
 
+-- Toggle subtarget macro debug (actions only)
+-- Usage: /xiui debug subtarget
+function M.SetSubtargetDebugEnabled(enabled)
+    actions.SetSubtargetDebugEnabled(enabled);
+    local state = enabled and 'ON' or 'OFF';
+    print('[XIUI] Subtarget debug mode: ' .. state);
+end
+
 -- Check if debug is enabled
 function M.IsDebugEnabled()
     return actions.IsDebugEnabled() or controller.IsDebugEnabled();
+end
+
+function M.IsSubtargetDebugEnabled()
+    return actions.IsSubtargetDebugEnabled();
 end
 
 -- Toggle palette key debug mode

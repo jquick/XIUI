@@ -24,6 +24,7 @@ local petbarModule = require('config.petbar');
 local notificationsModule = require('config.notifications');
 local treasurepoolModule = require('config.treasurepool');
 local hotbarModule = require('config.hotbar');
+local readycheckModule = require('config.readycheck');
 
 local treasurePool = require('modules.treasurepool.init');
 local macropalette = require('modules.hotbar.macropalette');
@@ -33,6 +34,11 @@ local config = {};
 
 -- Track previous config state to detect when config closes
 local wasConfigOpen = false;
+
+-- Track last known config window geometry for smart reposition on open
+local lastConfigPosX, lastConfigPosY = 20, 20;
+local lastConfigSizeW, lastConfigSizeH = 900, 650;
+local configHasBeenOpened = false;
 
 -- Global modal state (accessible by other modules to know when to dim foreground elements)
 _XIUI_MODAL_OPEN = false;
@@ -85,7 +91,6 @@ end
 
 -- State for confirmation dialogs
 local showRestoreDefaultsConfirm = false;
-local pendingResetConfigWindow = false;
 
 -- Social icon textures
 local discordTexture = nil;
@@ -318,6 +323,7 @@ local categories = {
     { name = 'notifications', label = 'Notifications' },
     { name = 'treasurePool', label = 'Treasure Pool' },
     { name = 'hotbar', label = 'Hotbar' },
+    { name = 'readyCheck', label = 'Ready Check' },
 };
 
 
@@ -430,6 +436,10 @@ local function DrawHotbarSettings()
     applySettingsState(newState);
 end
 
+local function DrawReadyCheckSettings()
+    readycheckModule.DrawSettings();
+end
+
 -- Color settings draw functions with state handling
 local function DrawGlobalColorSettings()
     globalModule.DrawColorSettings();
@@ -492,6 +502,10 @@ local function DrawHotbarColorSettings()
     applyColorState(newState);
 end
 
+local function DrawReadyCheckColorSettings()
+    readycheckModule.DrawColorSettings();
+end
+
 -- Dispatch tables for settings and color settings
 local settingsDrawFunctions = {
     DrawGlobalSettings,
@@ -508,6 +522,7 @@ local settingsDrawFunctions = {
     DrawNotificationsSettings,
     DrawTreasurePoolSettings,
     DrawHotbarSettings,
+    DrawReadyCheckSettings,
 };
 
 local colorSettingsDrawFunctions = {
@@ -525,6 +540,7 @@ local colorSettingsDrawFunctions = {
     DrawNotificationsColorSettings,
     DrawTreasurePoolColorSettings,
     DrawHotbarColorSettings,
+    DrawReadyCheckColorSettings,
 };
 
 local function DrawProfilePopups()
@@ -633,22 +649,49 @@ config.DrawWindow = function(us)
         gConfig.treasurePoolMiniPreview = false;
         gConfig.treasurePoolFullPreview = false;
     end
+    local configJustOpened = isConfigOpen and not wasConfigOpen;
     wasConfigOpen = isConfigOpen;
 
     -- Early exit if config window isn't shown (atom0s recommendation)
     -- This prevents unnecessary style pushes and imgui.End() calls when window is hidden
     if (not showConfig[1]) then return; end
 
-    -- XIUI Theme Colors (dark + gold accent)
-    PushThemeStyles();
+    -- Constrain config window to never exceed the game's render resolution.
+    -- Prevents the window from being larger than the screen or lost off-screen on small resolutions.
+    local ioData = imgui.GetIO();
+    local sw = ioData.DisplaySize.x;
+    local sh = ioData.DisplaySize.y;
+    if not sw or sw < 1 then return; end
+    if not sh or sh < 1 then return; end
 
-    imgui.SetNextWindowSize({ 900, 650 }, ImGuiCond_FirstUseEver);
-    imgui.SetNextWindowPos({ 50, 50 }, ImGuiCond_FirstUseEver);
-    if pendingResetConfigWindow then
-        imgui.SetNextWindowPos({ 50, 50 }, ImGuiCond_Always);
-        pendingResetConfigWindow = false;
+    -- XIUI Theme Colors (dark + gold accent)
+    -- Push theme styles AFTER validating DisplaySize to avoid leaking
+    -- style/var pushes on early returns (which corrupt ImGui state).
+    PushThemeStyles();
+    -- Note: globalScale intentionally does NOT apply to this window.
+    -- The config is the place users go to fix bad scale values; scaling it
+    -- with the same slider can lock them out at extreme values.
+    local maxW = math.min(900, sw - 40);
+    local maxH = math.min(650, sh - 40);
+    imgui.SetNextWindowSizeConstraints({ 400, 300 }, { sw, sh });
+    -- On open: set ideal size for the current resolution and reset position if off-screen.
+    if configJustOpened then
+        if not configHasBeenOpened then
+            imgui.SetNextWindowSize({ maxW, maxH }, ImGuiCond_Always);
+            configHasBeenOpened = true;
+        elseif lastConfigSizeW > (sw - 40) or lastConfigSizeH > (sh - 40) then
+            imgui.SetNextWindowSize({ maxW, maxH }, ImGuiCond_Always);
+        end
+        local offScreen = lastConfigPosX < 0
+            or lastConfigPosY < 0
+            or (lastConfigPosX + lastConfigSizeW) > sw
+            or (lastConfigPosY + lastConfigSizeH) > sh;
+        if offScreen then
+            imgui.SetNextWindowPos({ 20, 20 }, ImGuiCond_Always);
+        end
     end
-    if(imgui.Begin("XIUI Config - v" .. addon.version, showConfig, bit.bor(ImGuiWindowFlags_NoSavedSettings, ImGuiWindowFlags_NoDocking))) then
+    local configVisible = imgui.Begin("XIUI Config - v" .. addon.version, showConfig, bit.bor(ImGuiWindowFlags_NoSavedSettings, ImGuiWindowFlags_NoDocking));
+    if configVisible then
         local windowWidth = imgui.GetContentRegionAvail();
         local sidebarWidth = 180;
         local contentWidth = windowWidth - sidebarWidth - 20;
@@ -678,11 +721,13 @@ config.DrawWindow = function(us)
         imgui.PushStyleVar(ImGuiStyleVar_FramePadding, {8, 6});
 
         -- Profiles Button
-        imgui.PushStyleColor(ImGuiCol_Button, bgLight);
+        imgui.PushStyleColor(ImGuiCol_Button, buttonColor);
+        imgui.PushStyleColor(ImGuiCol_ButtonHovered, buttonHoverColor);
+        imgui.PushStyleColor(ImGuiCol_ButtonActive, buttonActiveColor);
         if (imgui.Button("Profiles", { 0, 26 })) then
             showProfilesWindow[1] = true;
         end
-        imgui.PopStyleColor();
+        imgui.PopStyleColor(3);
         
         imgui.SameLine();
         imgui.PushItemWidth(300); -- Increased width for profile select
@@ -787,7 +832,6 @@ config.DrawWindow = function(us)
 
             if (imgui.Button("Confirm", { 120, 0 })) then
                 ResetSettings();
-                UpdateSettings();
                 imgui.CloseCurrentPopup();
             end
             imgui.SameLine();
@@ -942,6 +986,12 @@ config.DrawWindow = function(us)
         imgui.EndChild();
     end
 
+    -- Capture config window geometry while open for smart reposition on next open.
+    -- Two local assignments per frame — negligible cost, but ensures we always have
+    -- current values even on addon unload or profile change without an extra frame.
+    lastConfigPosX, lastConfigPosY = imgui.GetWindowPos();
+    lastConfigSizeW, lastConfigSizeH = imgui.GetWindowSize();
+
     imgui.End();
 
     -- Draw migration wizard if open (after main window so it overlays)
@@ -973,10 +1023,6 @@ end
 function config.OpenResetSettingsPopup()
     showConfig[1] = true;
     showRestoreDefaultsConfirm = true;
-end
-
-function config.ResetConfigWindowPosition()
-    pendingResetConfigWindow = true;
 end
 
 return config;

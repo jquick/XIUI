@@ -15,33 +15,18 @@ local data = require('modules.petbar.data');
 
 local pettarget = {};
 
--- ============================================
--- State Variables
--- ============================================
+-- Previous-frame window size cache (used for bg layering below content on the draw list)
+local cachedWindowSize = { width = nil, height = nil };
 
--- Background primitives (using windowbackground library)
-local backgroundPrim = nil;
-local loadedBgName = nil;
-
--- ============================================
--- Background Helpers
--- ============================================
-
-local function HideBackground()
-    if backgroundPrim then
-        windowBg.hide(backgroundPrim);
-    end
-end
-
-local function UpdateBackground(x, y, width, height, settings)
-    if not backgroundPrim then return; end
-
+local function DrawBackground(drawList, x, y, width, height, settings)
     -- Get scale from active pet type settings (same pattern as petbar data.lua)
     local petTypeKey = data.GetPetTypeKey();
-    local settingsKey = 'petBar' .. petTypeKey:gsub("^%l", string.upper);  -- 'petBarAvatar', etc.
+    local settingsKey = 'petBar' .. petTypeKey:gsub("^%l", string.upper);
     local typeSettings = gConfig[settingsKey] or {};
-    local bgScale = typeSettings.bgScale or 1.0;
-    local borderScale = typeSettings.borderScale or 1.0;
+    -- Prefer pet target's own scale sliders; fall back to the parent pet type
+    -- so existing users see no change until they touch the pet target sliders.
+    local bgScale = gConfig.petTargetBgScale or typeSettings.bgScale or 1.0;
+    local borderScale = gConfig.petTargetBorderScale or typeSettings.borderScale or 1.0;
 
     local bgTheme = gConfig.petTargetBackgroundTheme or gConfig.petBarBackgroundTheme or 'Window1';
     local bgOpacity = gConfig.petTargetBackgroundOpacity or gConfig.petBarBackgroundOpacity or 1.0;
@@ -49,8 +34,7 @@ local function UpdateBackground(x, y, width, height, settings)
     local borderColor = gConfig.colorCustomization and gConfig.colorCustomization.petTarget and gConfig.colorCustomization.petTarget.borderColor or 0xFFFFFFFF;
     local borderOpacity = gConfig.petTargetBorderOpacity or gConfig.petBarBorderOpacity or 1.0;
 
-    -- Common options for windowbackground library
-    local bgOptions = {
+    windowBg.Draw(drawList, x, y, width, height, {
         theme = bgTheme,
         padding = (settings and settings.bgPadding) or data.PADDING,
         paddingY = (settings and settings.bgPaddingY) or data.PADDING,
@@ -62,10 +46,7 @@ local function UpdateBackground(x, y, width, height, settings)
         bgOffset = (settings and settings.bgOffset) or 1,
         borderOpacity = borderOpacity,
         borderColor = borderColor,
-    };
-
-    -- Update background and borders using windowbackground library
-    windowBg.update(backgroundPrim, x, y, width, height, bgOptions);
+    });
 end
 
 -- ============================================
@@ -74,9 +55,11 @@ end
 function pettarget.DrawWindow(settings)
     local isPreview = showConfig and showConfig[1] and gConfig.petBarPreview;
 
+    -- Global UI scale multiplier; applied to raw gConfig.petTarget* / petBarTarget* fallbacks.
+    local gs = gConfig.globalScale or 1.0;
+
     -- Only show if we have a valid pet (prevents showing when "Always Visible" is on but no pet)
     if data.GetPetData() == nil then
-        HideBackground();
         return;
     end
 
@@ -90,20 +73,17 @@ function pettarget.DrawWindow(settings)
     else
         -- Only show if pet target tracking is enabled and we have a target
         if gConfig.petBarShowTarget == false or data.petTargetServerId == nil then
-            HideBackground();
             return;
         end
 
         -- Check if pet is targeting itself (e.g., after self-buff like Aerial Armor)
         local petEntity = data.GetPetEntity();
         if petEntity and petEntity.ServerId and data.petTargetServerId == petEntity.ServerId then
-            HideBackground();
             return;
         end
 
         local targetEnt = data.GetEntityByServerId(data.petTargetServerId);
         if targetEnt == nil or targetEnt.ActorPointer == 0 or targetEnt.HPPercent <= 0 then
-            HideBackground();
             data.petTargetServerId = nil;
             return;
         end
@@ -127,8 +107,8 @@ function pettarget.DrawWindow(settings)
     local anchor = gConfig.petTargetSnapAnchor or 'bottom';
     local anchorY = (anchor == 'top' and data.lastMainWindowTop) or data.lastMainWindowBottom;
     if snapEnabled and data.lastMainWindowPosX ~= nil and anchorY ~= nil then
-        local snapOffsetX = gConfig.petTargetSnapOffsetX or 0;
-        local snapOffsetY = gConfig.petTargetSnapOffsetY or 16;
+        local snapOffsetX = (gConfig.petTargetSnapOffsetX or 0) * gs;
+        local snapOffsetY = (gConfig.petTargetSnapOffsetY or 16) * gs;
         local snapX = data.lastMainWindowPosX + snapOffsetX;
         local snapY = anchorY + snapOffsetY;
         imgui.SetNextWindowPos({snapX, snapY}, ImGuiCond_Always);
@@ -145,28 +125,40 @@ function pettarget.DrawWindow(settings)
         local targetStartX, targetStartY = imgui.GetCursorScreenPos();
         local drawList = GetUIDrawList();
 
+        -- Draw background FIRST so it sits beneath text/bars on the draw list.
+        -- Window size only known after content; use previous frame's cached size (updated below).
+        if cachedWindowSize.width and cachedWindowSize.height then
+            DrawBackground(drawList, targetWinPosX, targetWinPosY, cachedWindowSize.width, cachedWindowSize.height, settings);
+        end
+
         imtext.SetConfigFromSettings(settings.vitals_font_settings);
 
-        local targetNameFontSize = gConfig.petBarTargetNameFontSize or gConfig.petBarTargetFontSize or settings.vitals_font_settings.font_height;
-        local targetHpFontSize = gConfig.petBarTargetHpFontSize or gConfig.petBarVitalsFontSize or settings.vitals_font_settings.font_height;
-        local targetDistanceFontSize = gConfig.petBarTargetDistanceFontSize or gConfig.petBarDistanceFontSize or settings.distance_font_settings.font_height;
+        -- Font sizes: first two fallbacks are raw user values (gs-scaled); third is from adjusted settings (already scaled).
+        local rawTargetNameFontSize = gConfig.petBarTargetNameFontSize or gConfig.petBarTargetFontSize;
+        local targetNameFontSize = rawTargetNameFontSize and (rawTargetNameFontSize * gs) or settings.vitals_font_settings.font_height;
+        local rawTargetHpFontSize = gConfig.petBarTargetHpFontSize or gConfig.petBarVitalsFontSize;
+        local targetHpFontSize = rawTargetHpFontSize and (rawTargetHpFontSize * gs) or settings.vitals_font_settings.font_height;
+        local rawTargetDistanceFontSize = gConfig.petBarTargetDistanceFontSize or gConfig.petBarDistanceFontSize;
+        local targetDistanceFontSize = rawTargetDistanceFontSize and (rawTargetDistanceFontSize * gs) or settings.distance_font_settings.font_height;
 
-        -- Bar dimensions with scale settings
+        -- Bar dimensions with scale settings (settings.barWidth/Height come from updater, already gs-scaled)
+        -- Use the un-HP-scaled base pet bar width so the target HP X slider is
+        -- independent of the pet HP X slider.
         local barScaleX = gConfig.petTargetBarScaleX or 1.0;
         local barScaleY = gConfig.petTargetBarScaleY or 1.0;
-        local barWidth = totalRowWidth * barScaleX;
+        local barWidth = (settings.barWidth or 150) * barScaleX;
         local barHeight = (settings.barHeight or 12) * barScaleY;
 
-        -- Get positioning settings
+        -- Get positioning settings (offsets scale with gs)
         local nameAbsolute = gConfig.petTargetNameAbsolute;
-        local nameOffsetX = gConfig.petTargetNameOffsetX or 0;
-        local nameOffsetY = gConfig.petTargetNameOffsetY or 0;
+        local nameOffsetX = (gConfig.petTargetNameOffsetX or 0) * gs;
+        local nameOffsetY = (gConfig.petTargetNameOffsetY or 0) * gs;
         local hpAbsolute = gConfig.petTargetHpAbsolute;
-        local hpOffsetX = gConfig.petTargetHpOffsetX or 0;
-        local hpOffsetY = gConfig.petTargetHpOffsetY or 0;
+        local hpOffsetX = (gConfig.petTargetHpOffsetX or 0) * gs;
+        local hpOffsetY = (gConfig.petTargetHpOffsetY or 0) * gs;
         local distanceAbsolute = gConfig.petTargetDistanceAbsolute;
-        local distanceOffsetX = gConfig.petTargetDistanceOffsetX or 0;
-        local distanceOffsetY = gConfig.petTargetDistanceOffsetY or 0;
+        local distanceOffsetX = (gConfig.petTargetDistanceOffsetX or 0) * gs;
+        local distanceOffsetY = (gConfig.petTargetDistanceOffsetY or 0) * gs;
 
         -- Row 1: Target Name (left-aligned)
         local targetColor = colorConfig.targetTextColor or petBarColorConfig.targetTextColor or 0xFFFFFFFF;
@@ -220,8 +212,11 @@ function pettarget.DrawWindow(settings)
             distDrawX = targetWinPosX + distanceOffsetX;
             distDrawY = targetWinPosY + distanceOffsetY;
         else
-            -- Inline positioning: below HP bar in layout flow
-            local distanceY = targetStartY + targetNameFontSize + 4 + barHeight + 2;
+            -- Inline positioning: below HP bar in layout flow.
+            -- Add the bar's border extent so the text clears the additive border.
+            local borderThickness = gConfig.barBorderThickness or 1;
+            local barBorderExtent = (borderThickness > 0) and (borderThickness / 2 + 0.5) or 0;
+            local distanceY = targetStartY + targetNameFontSize + 4 + barHeight + barBorderExtent + 2;
             distDrawX = targetStartX + distanceOffsetX;
             distDrawY = distanceY + distanceOffsetY;
             -- Add dummy for inline layout
@@ -229,80 +224,23 @@ function pettarget.DrawWindow(settings)
         end
         imtext.Draw(drawList, distStr, distDrawX, distDrawY, distanceColor, targetDistanceFontSize);
 
-        -- Update background
-        local targetWinWidth, targetWinHeight = imgui.GetWindowSize();
-        UpdateBackground(targetWinPosX, targetWinPosY, targetWinWidth, targetWinHeight, settings);
+        -- Cache window size for next frame's bg draw
+        cachedWindowSize.width, cachedWindowSize.height = imgui.GetWindowSize();
     end
     imgui.End();
 end
 
--- ============================================
--- Initialize
--- ============================================
 function pettarget.Initialize(settings)
-    -- Initialize background primitives using windowbackground library
-    local prim_data = settings.prim_data or {
-        visible = false,
-        can_focus = false,
-        locked = true,
-        width = 100,
-        height = 100,
-    };
-
-    -- Load background textures (use petTarget theme if set, otherwise petBar theme)
-    local backgroundName = gConfig.petTargetBackgroundTheme or gConfig.petBarBackgroundTheme or 'Window1';
-    loadedBgName = backgroundName;
-
-    -- Get scale from active pet type settings
-    local petTypeKey = data.GetPetTypeKey();
-    local settingsKey = 'petBar' .. petTypeKey:gsub("^%l", string.upper);
-    local typeSettings = gConfig[settingsKey] or {};
-    local bgScale = typeSettings.bgScale or 1.0;
-    local borderScale = typeSettings.borderScale or 1.0;
-
-    -- Create combined background + borders (no middle layer needed for pettarget)
-    backgroundPrim = windowBg.create(prim_data, backgroundName, bgScale, borderScale);
 end
 
--- ============================================
--- UpdateVisuals
--- ============================================
 function pettarget.UpdateVisuals(settings)
     imtext.Reset();
-
-    -- Get scale from active pet type settings
-    local petTypeKey = data.GetPetTypeKey();
-    local settingsKey = 'petBar' .. petTypeKey:gsub("^%l", string.upper);
-    local typeSettings = gConfig[settingsKey] or {};
-    local bgScale = typeSettings.bgScale or 1.0;
-    local borderScale = typeSettings.borderScale or 1.0;
-
-    -- Update background textures if theme changed (use petTarget theme if set, otherwise petBar theme)
-    local backgroundName = gConfig.petTargetBackgroundTheme or gConfig.petBarBackgroundTheme or 'Window1';
-    if loadedBgName ~= backgroundName then
-        loadedBgName = backgroundName;
-        windowBg.setTheme(backgroundPrim, backgroundName, bgScale, borderScale);
-    end
 end
 
--- ============================================
--- SetHidden
--- ============================================
 function pettarget.SetHidden(hidden)
-    if hidden then
-        HideBackground();
-    end
 end
 
--- ============================================
--- Cleanup
--- ============================================
 function pettarget.Cleanup()
-    -- Cleanup background primitives using windowbackground library
-    if backgroundPrim then
-        windowBg.destroy(backgroundPrim);
-        backgroundPrim = nil;
-    end
 end
 
 return pettarget;

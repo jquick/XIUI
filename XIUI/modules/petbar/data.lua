@@ -5,6 +5,8 @@
 
 require('common');
 require('handlers.helpers');
+local ffi = require('ffi');
+local imgui = require('imgui');
 local windowBg = require('libs.windowbackground');
 local packets = require('libs.packets');
 local abilityRecast = require('libs.abilityrecast');
@@ -100,66 +102,126 @@ data.allPetsWithImages = {
 -- Jug Pet Database (from PetMe addon)
 -- ============================================
 -- Each entry: name (in-game), maxLevel, duration (minutes)
-data.jugPets = {
-    -- 90 minute pets (lower level)
-    {name = 'FunguarFamiliar', maxLevel = 35, duration = 90},
-    {name = 'CourierCarrie', maxLevel = 23, duration = 90},
-    {name = 'SheepFamiliar', maxLevel = 35, duration = 90},
-    {name = 'TigerFamiliar', maxLevel = 40, duration = 90},
-    {name = 'FlytrapFamiliar', maxLevel = 40, duration = 90},
-    {name = 'LizardFamiliar', maxLevel = 45, duration = 90},
-    {name = 'MayflyFamiliar', maxLevel = 45, duration = 90},
+if HzLimitedMode then
+    data.jugPets = {
+        -- 30 minute pets
+        {name = 'CrabFamiliar', maxLevel = 55, duration = 30},
+        {name = 'CourierCarrie', maxLevel = 75, duration = 30},
+        {name = 'AmigoSabotender', maxLevel = 75, duration = 30},
 
-    -- 60 minute pets (mid level)
-    {name = 'EftFamiliar', maxLevel = 50, duration = 60},
-    {name = 'BeetleFamiliar', maxLevel = 55, duration = 60},
-    {name = 'AntlionFamiliar', maxLevel = 55, duration = 60},
-    {name = 'MiteFamiliar', maxLevel = 55, duration = 60},
-    {name = 'KeenearedSteffi', maxLevel = 75, duration = 60},
-    {name = 'LullabyMelodia', maxLevel = 75, duration = 60},
-    {name = 'FlowerpotBen', maxLevel = 75, duration = 60},
-    {name = 'FlowerpotBill', maxLevel = 75, duration = 60},
-    {name = 'Homunculus', maxLevel = 75, duration = 60},
-    {name = 'VoraciousAudrey', maxLevel = 75, duration = 60},
-    {name = 'AmbusherAllie', maxLevel = 75, duration = 60},
-    {name = 'LifedrinkerLars', maxLevel = 75, duration = 60},
-    {name = 'PanzerGalahad', maxLevel = 75, duration = 60},
-    {name = 'ChopsueyChucky', maxLevel = 75, duration = 60},
-    {name = 'AmigoSabotender', maxLevel = 75, duration = 60},
+        -- 60 minute pets
+        {name = 'SheepFamiliar', maxLevel = 35, duration = 60},
+        {name = 'FlowerpotBill', maxLevel = 40, duration = 60},
+        {name = 'TigerFamiliar', maxLevel = 40, duration = 60},
+        {name = 'FlytrapFamiliar', maxLevel = 40, duration = 60},
+        {name = 'LizardFamiliar', maxLevel = 45, duration = 60},
+        {name = 'MayflyFamiliar', maxLevel = 45, duration = 60},
+        {name = 'EftFamiliar', maxLevel = 45, duration = 60},
+        {name = 'BeetleFamiliar', maxLevel = 45, duration = 60},
+        {name = 'AntlionFamiliar', maxLevel = 50, duration = 60},
+        {name = 'MiteFamiliar', maxLevel = 55, duration = 60},
+        {name = 'LullabyMelodia', maxLevel = 75, duration = 60},
+        {name = 'FlowerpotBen', maxLevel = 75, duration = 60},
+        {name = 'SaberSiravarde', maxLevel = 75, duration = 60},
+        {name = 'FunguarFamiliar', maxLevel = 65, duration = 60},
+        {name = 'ShellbusterOrob', maxLevel = 75, duration = 60},
+        {name = 'ColdbloodComo', maxLevel = 75, duration = 60},
+        {name = 'Homunculus', maxLevel = 75, duration = 60},
+        {name = 'VoraciousAudrey', maxLevel = 75, duration = 60},
+        {name = 'AmbusherAllie', maxLevel = 75, duration = 60},
+        {name = 'PanzerGalahad', maxLevel = 75, duration = 60},
+        {name = 'LifedrinkerLars', maxLevel = 75, duration = 60},
+        {name = 'ChopsueyChucky', maxLevel = 75, duration = 60},
 
-    -- 30 minute pets (high level)
-    {name = 'CraftyClyvonne', maxLevel = 75, duration = 30},
-    {name = 'BloodclawShasra', maxLevel = 75, duration = 30},
-    {name = 'GorefangHobs', maxLevel = 75, duration = 30},
-    {name = 'DipperYuly', maxLevel = 75, duration = 30},
-    {name = 'SunburstMalfik', maxLevel = 75, duration = 30},
-    {name = 'WarlikePatrick', maxLevel = 75, duration = 30},
-    {name = 'ScissorlegXerin', maxLevel = 75, duration = 30},
-    {name = 'BouncingBertha', maxLevel = 75, duration = 30},
-    {name = 'RhymingShizuna', maxLevel = 75, duration = 30},
-    {name = 'AttentiveIbuki', maxLevel = 75, duration = 30},
-    {name = 'SwoopingZhivago', maxLevel = 75, duration = 30},
-    {name = 'GenerousArthur', maxLevel = 75, duration = 30},
-    {name = 'ThreestarLynn', maxLevel = 75, duration = 30},
-    {name = 'BrainyWaluis', maxLevel = 75, duration = 30},
-    {name = 'FaithfulFalcorr', maxLevel = 75, duration = 30},
-    {name = 'SharpwitHermes', maxLevel = 99, duration = 30},
-    {name = 'HeadbreakerKen', maxLevel = 99, duration = 30},
-    {name = 'RedolentCandi', maxLevel = 99, duration = 30},
-    {name = 'AlluringHoney', maxLevel = 99, duration = 30},
-    {name = 'CaringKiyomaro', maxLevel = 99, duration = 30},
-    {name = 'VivaciousVickie', maxLevel = 99, duration = 30},
-    {name = 'HurlerPercival', maxLevel = 99, duration = 30},
-    {name = 'BlackbeardRandy', maxLevel = 99, duration = 30},
-    {name = 'FleetReinhard', maxLevel = 99, duration = 30},
-    {name = 'GooeyGerard', maxLevel = 99, duration = 30},
-    {name = 'CrudeRaphie', maxLevel = 99, duration = 30},
-    {name = 'DroopyDortwin', maxLevel = 99, duration = 30},
-    {name = 'SunburstMalfik', maxLevel = 99, duration = 30},
-    {name = 'PonderingPeter', maxLevel = 99, duration = 30},
-    {name = 'MosquitoFamilia', maxLevel = 99, duration = 30},
-    {name = 'Left-HandedYoko', maxLevel = 99, duration = 30},
-};
+        -- 90 minute pets
+        {name = 'HareFamiliar', maxLevel = 35, duration = 90},
+        {name = 'KeenearedSteffi', maxLevel = 75, duration = 90},
+    };
+else
+    data.jugPets = {
+        -- 30 minute pets
+        {name = 'CrabFamiliar', maxLevel = 55, duration = 30},
+        {name = 'CourierCarrie', maxLevel = 75, duration = 30},
+        {name = 'AmigoSabotender', maxLevel = 75, duration = 30},
+        {name = 'SlipperySilas', maxLevel = 99, duration = 30},
+
+        -- 60 minute pets
+        {name = 'SheepFamiliar', maxLevel = 35, duration = 60},
+        {name = 'FlowerpotBill', maxLevel = 40, duration = 60},
+        {name = 'TigerFamiliar', maxLevel = 40, duration = 60},
+        {name = 'FlytrapFamiliar', maxLevel = 40, duration = 60},
+        {name = 'LizardFamiliar', maxLevel = 45, duration = 60},
+        {name = 'MayflyFamiliar', maxLevel = 45, duration = 60},
+        {name = 'EftFamiliar', maxLevel = 45, duration = 60},
+        {name = 'BeetleFamiliar', maxLevel = 45, duration = 60},
+        {name = 'AntlionFamiliar', maxLevel = 50, duration = 60},
+        {name = 'MiteFamiliar', maxLevel = 55, duration = 60},
+        {name = 'LullabyMelodia', maxLevel = 55, duration = 60},
+        {name = 'FlowerpotBen', maxLevel = 63, duration = 60},
+        {name = 'SaberSiravarde', maxLevel = 63, duration = 60},
+        {name = 'FunguarFamiliar', maxLevel = 65, duration = 60},
+        {name = 'ShellbusterOrob', maxLevel = 65, duration = 60},
+        {name = 'ColdbloodComo', maxLevel = 65, duration = 60},
+        {name = 'Homunculus', maxLevel = 75, duration = 60},
+        {name = 'VoraciousAudrey', maxLevel = 75, duration = 60},
+        {name = 'AmbusherAllie', maxLevel = 75, duration = 60},
+        {name = 'PanzerGalahad', maxLevel = 75, duration = 60},
+        {name = 'LifedrinkerLars', maxLevel = 75, duration = 60},
+        {name = 'ChopsueyChucky', maxLevel = 75, duration = 60},
+
+        -- 90 minute pets
+        {name = 'HareFamiliar', maxLevel = 35, duration = 90},
+        {name = 'KeenearedSteffi', maxLevel = 55, duration = 90},
+        {name = 'GooeyGerard', maxLevel = 99, duration = 90},
+        {name = 'CrudeRaphie', maxLevel = 99, duration = 90},
+
+        -- 120 minute pets
+        {name = 'NurseryNazuna', maxLevel = 86, duration = 120},
+        {name = 'CraftyClyvonne', maxLevel = 90, duration = 120},
+        {name = 'PrestoJulio', maxLevel = 93, duration = 120},
+        {name = 'SwiftSieghard', maxLevel = 94, duration = 120},
+        {name = 'MailbusterCetas', maxLevel = 95, duration = 120},
+        {name = 'AudaciousAnna', maxLevel = 95, duration = 120},
+        {name = 'TurbidToloi', maxLevel = 99, duration = 120},
+        {name = 'LuckyLulush', maxLevel = 99, duration = 120},
+        {name = 'DipperYuly', maxLevel = 99, duration = 120},
+        {name = 'DapperMac', maxLevel = 99, duration = 120},
+        {name = 'DiscreetLouise', maxLevel = 99, duration = 120},
+        {name = 'FatsoFargann', maxLevel = 99, duration = 120},
+        {name = 'FaithfulFalcorr', maxLevel = 99, duration = 120},
+        {name = 'BugeyedBroncha', maxLevel = 99, duration = 120},
+        {name = 'BloodclawShasra', maxLevel = 99, duration = 120},
+        {name = 'GorefangHobs', maxLevel = 99, duration = 120},
+        {name = 'DroopyDortwin', maxLevel = 103, duration = 120},
+        {name = 'SunburstMalfik', maxLevel = 104, duration = 120},
+        {name = 'WarlikePatrick', maxLevel = 104, duration = 120},
+        {name = 'ScissorlegXerin', maxLevel = 105, duration = 120},
+        {name = 'RhymingShizuna', maxLevel = 107, duration = 120},
+        {name = 'AttentiveIbuki', maxLevel = 109, duration = 120},
+        {name = 'AmiableRoche', maxLevel = 110, duration = 120},
+        {name = 'BrainyWaluis', maxLevel = 113, duration = 120},
+        {name = 'HeraldHenry', maxLevel = 113, duration = 120},
+        {name = 'SuspiciousAlice', maxLevel = 113, duration = 120},
+        {name = 'HeadbreakerKen', maxLevel = 115, duration = 120},
+        {name = 'RedolentCandi', maxLevel = 115, duration = 120},
+        {name = 'AnklebiterJedd', maxLevel = 116, duration = 120},
+        {name = 'CaringKiyomaro', maxLevel = 116, duration = 120},
+        {name = 'HurlerPercival', maxLevel = 116, duration = 120},
+        {name = 'BlackbeardRandy', maxLevel = 117, duration = 120},
+        {name = 'FleetReinhard', maxLevel = 117, duration = 120},
+        {name = 'AlluringHoney', maxLevel = 119, duration = 120},
+        {name = 'BouncingBertha', maxLevel = 119, duration = 120},
+        {name = 'BraveHeroGlenn', maxLevel = 119, duration = 120},
+        {name = 'CursedAnnabelle', maxLevel = 119, duration = 120},
+        {name = 'GenerousArthur', maxLevel = 119, duration = 120},
+        {name = 'SharpwitHermes', maxLevel = 119, duration = 120},
+        {name = 'SwoopingZhivago', maxLevel = 119, duration = 120},
+        {name = 'ThreestarLynn', maxLevel = 119, duration = 120},
+
+        -- 180 minute pets
+        {name = 'FlowerpotMerle', maxLevel = 99, duration = 180},
+    };
+end
 
 -- ============================================
 -- Charm Calculation Constants (from PetMe)
@@ -279,8 +341,14 @@ function data.GetPetLevel(petName, playerLevel)
         return playerLevel;
     end
 
-    -- For charmed pets, we can't know the level without tracking the charm action
+    -- For charmed pets, get level from charm check packet
+    if gConfig.petBarCharmLevel then
+       return gConfig.petBarCharmLevel;
+    end
+
+    -- Fallback
     return nil;
+    
 end
 
 -- ============================================
@@ -483,18 +551,11 @@ data.charmState = 0;            -- Packet interception state
 data.charmTarget = nil;         -- Target ID for charm check
 data.charmTargetIdx = nil;      -- Target Index for charm check
 
--- Background primitives
-data.backgroundPrim = {};
-data.loadedBgName = nil;
-
--- Pet image primitive (overlay on background)
-data.petImagePrim = nil;
-
--- Pet image textures for ImGui rendering (used when clip mode enabled)
+-- Pet image textures (D3D textures rendered via drawList:AddImage)
 data.petImageTextures = {};
 
--- Clipped pet image render info (set by UpdateBackground, rendered by display)
-data.clippedPetImageInfo = nil;
+-- Pet image metadata: petKey -> { baseWidth, baseHeight, exists }
+data.petImageMeta = {};
 
 -- Recast timer tracking
 data.recastMaxTimers = {};
@@ -630,13 +691,13 @@ function data.GetPetData()
     local party = GetPartySafe();
     local playerEnt = GetPlayerEntity();
 
-    if player == nil or party == nil or playerEnt == nil then
-        -- No pet - clear tracking
-        data.TrackPetSummon(nil, nil);
+    if player.isZoning or player:GetMainJob() == 0 then
         return nil;
     end
 
-    if player.isZoning or player:GetMainJob() == 0 then
+    if player == nil or party == nil or playerEnt == nil then
+        -- No pet - clear tracking
+        data.TrackPetSummon(nil, nil);
         return nil;
     end
 
@@ -1104,59 +1165,79 @@ function data.GetPetRecasts()
 end
 
 -- ============================================
--- Background Primitive Helpers
+-- Background Rendering
 -- ============================================
 
--- Hide all background primitives
+-- No-op kept for backwards compatibility with callers — immediate-mode rendering means
+-- backgrounds simply aren't drawn when DrawWindow isn't called.
 function data.HideBackground()
-    -- Hide background and borders using windowbackground library
-    windowBg.hide(data.backgroundPrim);
-
-    -- Hide all pet image primitives (petbar-specific) - both layers
-    if data.petImagePrims then
-        for _, prim in pairs(data.petImagePrims) do
-            if prim then
-                prim.visible = false;
-            end
-        end
-    end
-    if data.petImagePrimsTop then
-        for _, prim in pairs(data.petImagePrimsTop) do
-            if prim then
-                prim.visible = false;
-            end
-        end
-    end
 end
 
--- Update background primitives position and visibility
-function data.UpdateBackground(x, y, width, height, settings)
+-- Resolve pet image settings (returns nil if no image should be shown)
+local function ResolvePetImageSettings()
+    if not data.currentPetName then return nil; end
+
+    local petKey = data.GetPetSettingsKey(data.currentPetName);
+    local petTypeKey = data.GetPetTypeKey();
+
+    if petTypeKey == 'wyvern' then
+        petKey = 'wyvern';
+        local s = gConfig.petBarWyvern or {};
+        if not s.showImage then return nil; end
+        return {
+            petKey = petKey,
+            scale = s.imageScale or 0.4,
+            opacity = s.imageOpacity or 0.3,
+            offsetX = s.imageOffsetX or 0,
+            offsetY = s.imageOffsetY or 0,
+            clipToBackground = s.imageClipToBackground or false,
+        };
+    end
+
+    if not gConfig.petBarShowImage then return nil; end
+    local avatarSettings = gConfig.petBarAvatarSettings and gConfig.petBarAvatarSettings[petKey];
+    if avatarSettings then
+        return {
+            petKey = petKey,
+            scale = avatarSettings.scale or 0.4,
+            opacity = avatarSettings.opacity or 0.3,
+            offsetX = avatarSettings.offsetX or 0,
+            offsetY = avatarSettings.offsetY or 0,
+            clipToBackground = avatarSettings.clipToBackground or false,
+        };
+    end
+    return {
+        petKey = petKey,
+        scale = gConfig.petBarImageScale or 0.4,
+        opacity = gConfig.petBarImageOpacity or 0.3,
+        offsetX = gConfig.petBarImageOffsetX or 0,
+        offsetY = gConfig.petBarImageOffsetY or 0,
+        clipToBackground = false,
+    };
+end
+
+-- Draw background, pet image (middle layer), and borders for the petbar window.
+-- Pet image rendering is interleaved: clipped pet images render between bg and borders;
+-- unclipped pet images render on top of borders (after).
+function data.UpdateBackground(drawList, x, y, width, height, settings)
+    if drawList == nil then return; end
+
     -- Get per-pet-type settings
     local petTypeKey = data.GetPetTypeKey();
-    local settingsKey = 'petBar' .. petTypeKey:gsub("^%l", string.upper);  -- 'petBarAvatar', etc.
+    local settingsKey = 'petBar' .. petTypeKey:gsub("^%l", string.upper);
     local typeSettings = gConfig[settingsKey] or {};
     local typeColors = gConfig.colorCustomization and gConfig.colorCustomization[settingsKey] or {};
 
-    -- Background theme/opacity from per-type settings with legacy fallback
     local bgTheme = typeSettings.backgroundTheme or gConfig.petBarBackgroundTheme or 'Window1';
     local bgOpacity = typeSettings.backgroundOpacity or gConfig.petBarBackgroundOpacity or 1.0;
     local borderOpacity = typeSettings.borderOpacity or gConfig.petBarBorderOpacity or 1.0;
 
-    -- Colors from per-type settings with legacy fallback
     local bgColor = typeColors.bgColor or (gConfig.colorCustomization and gConfig.colorCustomization.petBar and gConfig.colorCustomization.petBar.bgColor) or 0xFFFFFFFF;
     local borderColor = typeColors.borderColor or (gConfig.colorCustomization and gConfig.colorCustomization.petBar and gConfig.colorCustomization.petBar.borderColor) or 0xFFFFFFFF;
 
-    -- Get scale from per-type settings (like bgTheme, bgOpacity)
     local bgScale = typeSettings.bgScale or 1.0;
     local borderScale = typeSettings.borderScale or 1.0;
 
-    -- Check if theme changed and reload textures if needed
-    if data.loadedBgName ~= bgTheme then
-        data.loadedBgName = bgTheme;
-        windowBg.setTheme(data.backgroundPrim, bgTheme, bgScale, borderScale);
-    end
-
-    -- Common options for windowbackground library
     local bgOptions = {
         theme = bgTheme,
         padding = settings.bgPadding or data.PADDING,
@@ -1171,135 +1252,60 @@ function data.UpdateBackground(x, y, width, height, settings)
         borderColor = borderColor,
     };
 
-    -- Update background and borders using windowbackground library
-    windowBg.update(data.backgroundPrim, x, y, width, height, bgOptions);
+    -- 1. Background (renders first, sits at bottom)
+    windowBg.DrawBackground(drawList, x, y, width, height, bgOptions);
 
-    -- Pet image overlay (petbar-specific - show correct avatar based on current pet)
-    -- Clear clipped image info
-    data.clippedPetImageInfo = nil;
-
-    -- First hide all pet image primitives (both clipped and unclipped sets)
-    if data.petImagePrims then
-        for _, prim in pairs(data.petImagePrims) do
-            if prim then
-                prim.visible = false;
-            end
-        end
-    end
-    if data.petImagePrimsTop then
-        for _, prim in pairs(data.petImagePrimsTop) do
-            if prim then
-                prim.visible = false;
-            end
-        end
+    -- Compute pet image spec (if any)
+    local imageSpec = ResolvePetImageSettings();
+    local petKey = imageSpec and imageSpec.petKey;
+    local meta = petKey and data.petImageMeta[petKey];
+    local texture = petKey and data.petImageTextures[petKey];
+    local canDrawImage = imageSpec and meta and meta.exists and texture and texture.image;
+    local imageTint;
+    local imgX, imgY, imgW, imgH;
+    if canDrawImage then
+        local alphaByte = math.floor(imageSpec.opacity * 255);
+        local argb = bit.bor(bit.lshift(alphaByte, 24), 0x00FFFFFF);
+        imageTint = imgui.GetColorU32(ARGBToImGui(argb));
+        imgX = x + imageSpec.offsetX;
+        imgY = y + imageSpec.offsetY;
+        imgW = meta.baseWidth * imageSpec.scale;
+        imgH = meta.baseHeight * imageSpec.scale;
     end
 
-    -- Show current pet's image if we have one
-    -- Check if image should be shown based on pet type settings
-    local showImage = false;
-    local petImageScale, petImageOpacity, petImageOffsetX, petImageOffsetY, clipToBackground;
-
-    if data.currentPetName and data.petImagePrims then
-        local petKey = data.GetPetSettingsKey(data.currentPetName);
-        local petTypeKey = data.GetPetTypeKey();  -- Get type by job, not name
-
-        -- For wyvern, use wyvern-specific settings from petBarWyvern
-        -- Use petTypeKey (job-based) instead of petKey (name-based) to handle renamed wyverns
-        if petTypeKey == 'wyvern' then
-            -- Override petKey to 'wyvern' for primitive lookup (handles renamed wyverns)
-            petKey = 'wyvern';
-            local wyvernSettings = gConfig.petBarWyvern or {};
-            showImage = wyvernSettings.showImage or false;
-            petImageScale = wyvernSettings.imageScale or 0.4;
-            petImageOpacity = wyvernSettings.imageOpacity or 0.3;
-            petImageOffsetX = wyvernSettings.imageOffsetX or 0;
-            petImageOffsetY = wyvernSettings.imageOffsetY or 0;
-            clipToBackground = wyvernSettings.imageClipToBackground or false;
-        else
-            -- For avatars/spirits, use the existing avatar settings system
-            showImage = gConfig.petBarShowImage or false;
-            local avatarSettings = gConfig.petBarAvatarSettings and gConfig.petBarAvatarSettings[petKey];
-
-            if avatarSettings then
-                petImageScale = avatarSettings.scale or 0.4;
-                petImageOpacity = avatarSettings.opacity or 0.3;
-                petImageOffsetX = avatarSettings.offsetX or 0;
-                petImageOffsetY = avatarSettings.offsetY or 0;
-                clipToBackground = avatarSettings.clipToBackground or false;
-            else
-                -- Fall back to legacy global settings
-                petImageScale = gConfig.petBarImageScale or 0.4;
-                petImageOpacity = gConfig.petBarImageOpacity or 0.3;
-                petImageOffsetX = gConfig.petBarImageOffsetX or 0;
-                petImageOffsetY = gConfig.petBarImageOffsetY or 0;
-                clipToBackground = false;
-            end
-        end
+    -- 2. Middle-layer pet image (clipped) — renders between bg and borders
+    if canDrawImage and imageSpec.clipToBackground then
+        local clipBounds = windowBg.GetClipBounds(x, y, width, height, {
+            padding = settings.bgPadding or data.PADDING,
+            paddingY = settings.bgPaddingY or data.PADDING,
+        });
+        drawList:PushClipRect(
+            {clipBounds.left, clipBounds.top},
+            {clipBounds.right, clipBounds.bottom},
+            true
+        );
+        drawList:AddImage(
+            tonumber(ffi.cast('uint32_t', texture.image)),
+            {imgX, imgY},
+            {imgX + imgW, imgY + imgH},
+            {0, 0}, {1, 1},
+            imageTint
+        );
+        drawList:PopClipRect();
     end
 
-    if showImage and data.currentPetName and data.petImagePrims then
-        local petKey = data.GetPetSettingsKey(data.currentPetName);
-        local petTypeKey = data.GetPetTypeKey();
-        -- For wyvern, use 'wyvern' key to handle renamed wyverns
-        if petTypeKey == 'wyvern' then
-            petKey = 'wyvern';
-        end
-        local primMiddle = data.petImagePrims[petKey];  -- Middle layer (for clipped)
-        local primTop = data.petImagePrimsTop and data.petImagePrimsTop[petKey];  -- Top layer (for unclipped)
+    -- 3. Borders (renders on top of bg + middle-layer pet image)
+    windowBg.DrawBorders(drawList, x, y, width, height, bgOptions);
 
-        -- Use middle layer prim for dimensions, but choose which to show based on clip setting
-        local prim = primMiddle;
-        if prim and prim.exists then
-
-            -- Calculate base image position and dimensions
-            local imgX = x + petImageOffsetX;
-            local imgY = y + petImageOffsetY;
-            local baseWidth = prim.baseWidth or 256;
-            local baseHeight = prim.baseHeight or 256;
-
-            -- Convert 0-1 opacity to alpha byte (0x00-0xFF), keep RGB as white
-            local alphaByte = math.floor(petImageOpacity * 255);
-            local primColor = bit.bor(bit.lshift(alphaByte, 24), 0x00FFFFFF);
-
-            if clipToBackground then
-                -- Use middle layer primitive (renders behind borders), clipped to background
-                local clipBounds = windowBg.getClipBounds(x, y, width, height, {
-                    theme = bgTheme,
-                    padding = settings.bgPadding or data.PADDING,
-                    paddingY = settings.bgPaddingY or data.PADDING,
-                    bgOffset = settings.bgOffset or 1,
-                });
-
-                local clipped = windowBg.clipImageToBounds(imgX, imgY, baseWidth * petImageScale, baseHeight * petImageScale, clipBounds, petImageScale);
-
-                if clipped then
-                    primMiddle.visible = true;
-                    primMiddle.position_x = clipped.x;
-                    primMiddle.position_y = clipped.y;
-                    primMiddle.texture_offset_x = clipped.texOffsetX;
-                    primMiddle.texture_offset_y = clipped.texOffsetY;
-                    primMiddle.width = clipped.width;
-                    primMiddle.height = clipped.height;
-                    primMiddle.scale_x = clipped.scaleX;
-                    primMiddle.scale_y = clipped.scaleY;
-                    primMiddle.color = primColor;
-                end
-            else
-                -- Use top layer primitive (renders on top of borders), no clipping
-                if primTop then
-                    primTop.visible = true;
-                    primTop.position_x = imgX;
-                    primTop.position_y = imgY;
-                    primTop.texture_offset_x = 0;
-                    primTop.texture_offset_y = 0;
-                    primTop.width = baseWidth;
-                    primTop.height = baseHeight;
-                    primTop.scale_x = petImageScale;
-                    primTop.scale_y = petImageScale;
-                    primTop.color = primColor;
-                end
-            end
-        end
+    -- 4. Top-layer pet image (unclipped) — renders on top of borders
+    if canDrawImage and not imageSpec.clipToBackground then
+        drawList:AddImage(
+            tonumber(ffi.cast('uint32_t', texture.image)),
+            {imgX, imgY},
+            {imgX + imgW, imgY + imgH},
+            {0, 0}, {1, 1},
+            imageTint
+        );
     end
 end
 
@@ -1378,7 +1384,7 @@ function data.GetPreviewPetData(previewType)
         mockData.job = data.JOB_BST;
         mockData.showMp = false;
         mockData.isCharmed = true;
-        mockData.level = nil;  -- Unknown for charmed pets
+        mockData.level = 35;
         mockData.charmElapsed = 183;  -- ~3 minutes elapsed
         mockData.petType = 'charm';
     end
@@ -1391,14 +1397,11 @@ end
 -- ============================================
 
 function data.Reset()
-    data.backgroundPrim = {};
-    data.petImagePrim = nil;
     data.petImageTextures = {};
-    data.clippedPetImageInfo = nil;
+    data.petImageMeta = {};
     data.petTargetServerId = nil;
     data.currentPetName = nil;
     data.recastMaxTimers = {};
-    data.loadedBgName = nil;
     -- Pet timer tracking reset
     data.petSummonTime = nil;
     data.petExpireTime = nil;

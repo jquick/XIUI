@@ -16,9 +16,10 @@ local imgui = require('imgui');
 
 local M = {};
 
--- GDI visual parity offsets (ImGui fonts render smaller than GDI at same size)
-local GDI_SIZE_OFFSET = 2;
-local GDI_OUTLINE_OFFSET = -1;
+-- ImGui fonts render visibly smaller than GDI at the same size; the +2
+-- compensates so existing font_height settings (carried over from the GDI
+-- era) keep matching their on-screen look. Outline width is taken literally.
+local SIZE_OFFSET = 2;
 
 -- Font cache: fontKey -> font handle (loaded once, reused across modules)
 local fontCache = {};
@@ -36,17 +37,18 @@ local colorCache = {};
 local pos = {0, 0};
 
 local fontFamilyToFile = {
-    tahoma        = { regular = 'tahoma.ttf',     bold = 'tahomabd.ttf' },
-    arial         = { regular = 'arial.ttf',       bold = 'arialbd.ttf' },
-    consolas      = { regular = 'consola.ttf',     bold = 'consolab.ttf' },
-    calibri       = { regular = 'calibri.ttf',     bold = 'calibrib.ttf' },
-    segoeui       = { regular = 'segoeui.ttf',     bold = 'segoeuib.ttf' },
-    ['segoe ui']  = { regular = 'segoeui.ttf',     bold = 'segoeuib.ttf' },
-    verdana       = { regular = 'verdana.ttf',     bold = 'verdanab.ttf' },
-    trebuchet     = { regular = 'trebuc.ttf',      bold = 'trebucbd.ttf' },
-    lucida        = { regular = 'lucon.ttf',       bold = 'lucon.ttf' },
-    ['courier new'] = { regular = 'cour.ttf',      bold = 'courbd.ttf' },
-    georgia       = { regular = 'georgia.ttf',     bold = 'georgiab.ttf' },
+    arial                    = { regular = 'arial.ttf',    bold = 'arialbd.ttf' },
+    calibri                  = { regular = 'calibri.ttf',  bold = 'calibrib.ttf' },
+    consolas                 = { regular = 'consola.ttf',  bold = 'consolab.ttf' },
+    ['courier new']          = { regular = 'cour.ttf',     bold = 'courbd.ttf' },
+    georgia                  = { regular = 'georgia.ttf',  bold = 'georgiab.ttf' },
+    ['lucida console']       = { regular = 'lucon.ttf',    bold = 'lucon.ttf' },
+    ['microsoft sans serif'] = { regular = 'micross.ttf',  bold = 'micross.ttf' },
+    ['segoe ui']             = { regular = 'segoeui.ttf',  bold = 'segoeuib.ttf' },
+    tahoma                   = { regular = 'tahoma.ttf',   bold = 'tahomabd.ttf' },
+    ['times new roman']      = { regular = 'times.ttf',    bold = 'timesbd.ttf' },
+    ['trebuchet ms']         = { regular = 'trebuc.ttf',   bold = 'trebucbd.ttf' },
+    verdana                  = { regular = 'verdana.ttf',  bold = 'verdanab.ttf' },
 };
 
 local function resolveFontPath(fontFamily, isBold)
@@ -125,7 +127,9 @@ end
 --- @param ow number Outline width in pixels
 function M.SetConfig(fontFamily, isBold, ow)
     loadFont(fontFamily, isBold);
-    outlineWidth = math.max(0, (ow or 2) + GDI_OUTLINE_OFFSET);
+    -- Clamp to [0, 2]. Past 2 the 4-cardinal outline renders as 4 ghosted
+    -- copies because the offsets exceed glyph stroke width.
+    outlineWidth = math.max(0, math.min(2, ow or 2));
 end
 
 --- Apply font settings from a font_settings table (as used by gAdjustedSettings).
@@ -139,11 +143,33 @@ function M.SetConfigFromSettings(fontSettings)
     M.SetConfig(family, isBold, ow);
 end
 
---- Reset font state (call on settings change to force font reload).
-function M.Reset()
-    fontCache = {};
+--- Pre-load every font family/weight pair the user can pick. Call from
+--- the addon's `load` event so AddFontFromFileTTF runs once, outside any
+--- d3d_present frame. After this, loadFont() becomes a pure cache lookup
+--- and the font atlas is never mutated mid-frame. Required for Ashita
+--- v4.16 (main lineage), which lacks the Q3 binary patches that let
+--- 4.3.x tolerate mid-frame atlas mutation.
+--- @param families string[] family names the user can select (e.g. config.components.available_fonts)
+function M.PrewarmFonts(families)
+    if type(families) ~= 'table' then return; end
+    for _, family in ipairs(families) do
+        if type(family) == 'string' then
+            loadFont(family, false);
+            loadFont(family, true);
+        end
+    end
     activeFont = nil;
     activeFontKey = '';
+end
+
+--- Reset transient frame caches (call on settings change).
+--- NOTE: fontCache and activeFont are intentionally NOT cleared. ImFont
+--- pointers are owned by ImGui's atlas and remain valid for the addon's
+--- lifetime; re-calling AddFontFromFileTTF mid-frame from d3d_present
+--- mutates the atlas while drawList entries are pending render, which
+--- causes EXCEPTION_ACCESS_VIOLATION. The (family, isBold) cache key
+--- already routes new selections without needing a reload.
+function M.Reset()
     cachedOutlineCol = nil;
     lineHeightFrame = -1;
     colorCache = {};
@@ -155,7 +181,7 @@ end
 --- @return number width, number height
 function M.Measure(text, fontSize)
     if not text or text == '' then return 0, 0; end
-    if fontSize then fontSize = fontSize + GDI_SIZE_OFFSET; end
+    if fontSize then fontSize = fontSize + SIZE_OFFSET; end
 
     local font = activeFont;
     if font and fontSize then
@@ -188,7 +214,7 @@ end
 --- @param fontSize number|nil Pixel size (nil uses ImGui default)
 function M.Draw(drawList, text, x, y, argbColor, fontSize)
     if not drawList or not text or text == '' then return; end
-    if fontSize then fontSize = fontSize + GDI_SIZE_OFFSET; end
+    if fontSize then fontSize = fontSize + SIZE_OFFSET; end
     local font = M.GetFont();
     local col = argbToU32(argbColor);
     local ow = outlineWidth;
@@ -231,9 +257,37 @@ end
 --- @param fontSize number|nil
 function M.DrawSimple(drawList, text, x, y, argbColor, fontSize)
     if not drawList or not text or text == '' then return; end
-    if fontSize then fontSize = fontSize + GDI_SIZE_OFFSET; end
+    if fontSize then fontSize = fontSize + SIZE_OFFSET; end
     local font = M.GetFont();
     local col = argbToU32(argbColor);
+    pos[1] = x; pos[2] = y;
+    if fontSize and font then
+        drawList:AddText(font, fontSize, pos, col, text);
+    else
+        drawList:AddText(pos, col, text);
+    end
+end
+
+--- Draw text with a single drop-shadow (2 AddText calls vs Draw's 5).
+--- Used by hot per-frame paths (hotbar slots) where the full 4-cardinal
+--- outline is too expensive when stacked with another addon also issuing
+--- many ImGui primitives. Visually a bottom-right shadow; legibility on
+--- bright backgrounds is close to a full outline at a fraction of the cost.
+function M.DrawShadow(drawList, text, x, y, argbColor, fontSize)
+    if not drawList or not text or text == '' then return; end
+    if fontSize then fontSize = fontSize + SIZE_OFFSET; end
+    local font = M.GetFont();
+    local col = argbToU32(argbColor);
+    local ow = outlineWidth;
+    if ow > 0 then
+        local shadowCol = getOutlineCol();
+        pos[1] = x + ow; pos[2] = y + ow;
+        if fontSize and font then
+            drawList:AddText(font, fontSize, pos, shadowCol, text);
+        else
+            drawList:AddText(pos, shadowCol, text);
+        end
+    end
     pos[1] = x; pos[2] = y;
     if fontSize and font then
         drawList:AddText(font, fontSize, pos, col, text);

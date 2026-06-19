@@ -2,17 +2,11 @@ require('common');
 require('handlers.helpers');
 local imgui = require('imgui');
 local imtext = require('libs.imtext');
-local primitives = require('primitives');
 local debuffHandler = require('handlers.debuffhandler');
 local statusHandler = require('handlers.statushandler');
 local actionTracker = require('handlers.actiontracker');
 local progressbar = require('libs.progressbar');
 local defaultPositions = require('libs.defaultpositions');
-
--- Position save/restore state
-local hasAppliedSavedPosition = false;
-local forcePositionReset = false;
-local lastSavedPosX, lastSavedPosY = nil, nil;
 
 -- Note: RENDER_FLAG_VISIBLE and RENDER_FLAG_HIDDEN are now imported from helpers.lua
 
@@ -67,13 +61,6 @@ local previewTargets = {
     [9007] = 'Longtargetname',
     [9008] = 'Redmage',
 };
-
--- Track which enemy indices are currently active (for background visibility management)
-local activeEnemyIndices = {};
-
--- Background primitive objects (keyed by numeric enemy index)
-local enemyBackgrounds = {};  -- Background rectangles for each enemy entry
-local enemyTargetBackgrounds = {};  -- Background rectangles for target containers
 
 -- Cache for truncated names to avoid expensive binary search every frame
 -- Key: enemy index, Value: {name = original_name, maxWidth = width, fontHeight = height, truncated = result}
@@ -141,20 +128,6 @@ enemylist.DrawWindow = function(settings)
 	local windowWidth = (windowMargin * 2) + (singleColumnWidth * maxColumns) + (columnSpacing * (maxColumns - 1));
 	imgui.SetNextWindowSize({ windowWidth, -1, }, ImGuiCond_Always);
 
-	-- Handle position reset or restore
-	if forcePositionReset then
-		local defX, defY = defaultPositions.GetEnemyListPosition();
-		imgui.SetNextWindowPos({defX, defY}, ImGuiCond_Always);
-		forcePositionReset = false;
-		hasAppliedSavedPosition = true;
-		lastSavedPosX, lastSavedPosY = defX, defY;
-	elseif not hasAppliedSavedPosition and gConfig.enemyListWindowPosX ~= nil then
-		imgui.SetNextWindowPos({gConfig.enemyListWindowPosX, gConfig.enemyListWindowPosY}, ImGuiCond_Once);
-		hasAppliedSavedPosition = true;
-		lastSavedPosX = gConfig.enemyListWindowPosX;
-		lastSavedPosY = gConfig.enemyListWindowPosY;
-	end
-
 	-- Draw the main target window
 	local windowFlags = GetBaseWindowFlags(gConfig.lockPositions);
 
@@ -186,10 +159,6 @@ enemylist.DrawWindow = function(settings)
 
 		-- Cache entity manager once per frame (avoid repeated GetEntitySafe() calls)
 		local entityMgr = GetEntitySafe();
-
-		-- Track previous active indices and reset for this frame
-		local previousActiveIndices = activeEnemyIndices;
-		activeEnemyIndices = {};
 
 		-- Get draw list and configure imtext for this frame
 		local drawList = GetUIDrawList();
@@ -301,7 +270,7 @@ enemylist.DrawWindow = function(settings)
 				local barWidth = math.max(entryWidth - (padding * 2), 1);
 
 				-- ===== BACKGROUND & BORDER RENDERING =====
-				-- We need to draw these BEFORE the ImGui content so they appear behind progress bars
+				-- Draw bg fill first, then border on top; both before any content so progress bars / text overlay correctly.
 
 				-- Get entity name color based on type and claim status (ARGB format)
 				local nameColor;
@@ -311,6 +280,20 @@ enemylist.DrawWindow = function(settings)
 				else
 					nameColor = GetEntityNameColor(ent, k, gConfig.colorCustomization.shared);
 				end
+
+				-- Background fill
+				local bgColor = gConfig.colorCustomization.enemyList.backgroundColor;
+				local bgOpacity = gConfig.enemyListBackgroundOpacity;
+				if (bgOpacity ~= nil) then
+					bgColor = ApplyOpacityToColor(bgColor, bgOpacity);
+				end
+				drawList:AddRectFilled(
+					{entryStartX, entryStartY},
+					{entryStartX + entryWidth, entryStartY + entryHeight},
+					imgui.GetColorU32(ARGBToRGBA(bgColor)),
+					bgRadius,
+					ImDrawCornerFlags_All
+				);
 
 				if (gConfig.showEnemyListBorders) then
 					local borderColor;
@@ -326,9 +309,7 @@ enemylist.DrawWindow = function(settings)
 						borderColor = imgui.GetColorU32(ARGBToRGBA(gConfig.colorCustomization.enemyList.borderColor or 0xFF000000));
 					end
 
-					-- Draw border rectangle around the entire entry
-					-- Window margins ensure this won't be clipped
-					imgui.GetWindowDrawList():AddRect(
+					drawList:AddRect(
 						{entryStartX, entryStartY},
 						{entryStartX + entryWidth, entryStartY + entryHeight},
 						borderColor,
@@ -338,38 +319,10 @@ enemylist.DrawWindow = function(settings)
 					);
 				end
 
-				-- ===== PRIMITIVE BACKGROUND RENDERING =====
-				-- Create/get background primitive for this enemy
-				-- Primitives render in the correct layer (behind ImGui draw list)
-				if (enemyBackgrounds[k] == nil and settings.prim_data) then
-					enemyBackgrounds[k] = primitives.new(settings.prim_data);
-					enemyBackgrounds[k].can_focus = false;
-					enemyBackgrounds[k].locked = true;
-				end
-
-				if (enemyBackgrounds[k] ~= nil) then
-					local bg = enemyBackgrounds[k];
-					-- Set background position and size
-					bg.position_x = entryStartX;
-					bg.position_y = entryStartY;
-					bg.width = entryWidth;
-					bg.height = entryHeight;
-					local bgColor = gConfig.colorCustomization.enemyList.backgroundColor;
-					local bgOpacity = gConfig.enemyListBackgroundOpacity;
-					if (bgOpacity ~= nil and bgOpacity < 1.0) then
-						bgColor = ApplyOpacityToColor(bgColor, bgOpacity);
-					end
-					bg.color = bgColor;
-					bg.visible = true;
-				end
-
 				-- ===== CONTENT RENDERING =====
 				-- ROW 1: Enemy Name (colored based on entity type and claim status)
 				local nameX = entryStartX + padding;
 				local nameY = entryStartY + padding;
-
-				-- Mark this enemy index as active for background visibility management
-				activeEnemyIndices[k] = true;
 
 				-- Truncate name to fit within available width (use cache to avoid per-frame binary search)
 				local maxNameWidth = entryWidth - (padding * 2);
@@ -489,28 +442,19 @@ enemylist.DrawWindow = function(settings)
 						local targetNameHeight = settings.target_font_settings.font_height;
 						local targetTotalHeight = (targetPadding * 2) + targetNameHeight;
 
-						-- ===== PRIMITIVE BACKGROUND RENDERING =====
-						-- Create/get background primitive for this target container
-						if (enemyTargetBackgrounds[k] == nil and settings.prim_data) then
-							enemyTargetBackgrounds[k] = primitives.new(settings.prim_data);
-							enemyTargetBackgrounds[k].can_focus = false;
-							enemyTargetBackgrounds[k].locked = true;
+						-- Target container background fill
+						local targetBgColor = gConfig.colorCustomization.enemyList.targetBackgroundColor or gConfig.colorCustomization.enemyList.backgroundColor;
+						local targetBgOpacity = gConfig.enemyListTargetBackgroundOpacity;
+						if (targetBgOpacity ~= nil) then
+							targetBgColor = ApplyOpacityToColor(targetBgColor, targetBgOpacity);
 						end
-
-						if (enemyTargetBackgrounds[k] ~= nil) then
-							local targetBg = enemyTargetBackgrounds[k];
-							targetBg.position_x = targetContainerX;
-							targetBg.position_y = targetContainerY;
-							targetBg.width = targetWidth;
-							targetBg.height = targetTotalHeight;
-							local targetBgColor = gConfig.colorCustomization.enemyList.targetBackgroundColor or gConfig.colorCustomization.enemyList.backgroundColor;
-							local targetBgOpacity = gConfig.enemyListTargetBackgroundOpacity;
-							if (targetBgOpacity ~= nil and targetBgOpacity < 1.0) then
-								targetBgColor = ApplyOpacityToColor(targetBgColor, targetBgOpacity);
-							end
-							targetBg.color = targetBgColor;
-							targetBg.visible = true;
-						end
+						drawList:AddRectFilled(
+							{targetContainerX, targetContainerY},
+							{targetContainerX + targetWidth, targetContainerY + targetTotalHeight},
+							imgui.GetColorU32(ARGBToRGBA(targetBgColor)),
+							bgRadius,
+							ImDrawCornerFlags_All
+						);
 
 						-- Target name text
 						local targetTextColor = gConfig.colorCustomization.enemyList.targetNameTextColor or 0xFFFFAA00;
@@ -529,11 +473,6 @@ enemylist.DrawWindow = function(settings)
 						end
 
 						imtext.Draw(drawList, displayTargetName, targetContainerX + targetPadding, targetContainerY + targetPadding, targetTextColor, targetFontHeight);
-					else
-						-- Hide target background if enemy has no valid target (prevents stale overlays)
-						if (enemyTargetBackgrounds[k] ~= nil) then
-							enemyTargetBackgrounds[k].visible = false;
-						end
 					end
 				end
 
@@ -568,29 +507,6 @@ enemylist.DrawWindow = function(settings)
 			end
 		end
 
-		-- Hide backgrounds for enemies that were active last frame but not this frame
-		-- Only iterate over previously active indices (avoids iterating all backgrounds)
-		for enemyIndex in pairs(previousActiveIndices) do
-			if not activeEnemyIndices[enemyIndex] then
-				-- This enemy was visible last frame but not this frame - hide its backgrounds
-				if enemyBackgrounds[enemyIndex] then
-					enemyBackgrounds[enemyIndex].visible = false;
-				end
-				if enemyTargetBackgrounds[enemyIndex] then
-					enemyTargetBackgrounds[enemyIndex].visible = false;
-				end
-			end
-		end
-
-		-- Hide target backgrounds for active enemies when showEnemyListTargets is disabled
-		if not gConfig.showEnemyListTargets then
-			for enemyIndex in pairs(activeEnemyIndices) do
-				if enemyTargetBackgrounds[enemyIndex] then
-					enemyTargetBackgrounds[enemyIndex].visible = false;
-				end
-			end
-		end
-
 		-- Update max height from last column
 		if (currentColumnHeight > maxColumnHeight) then
 			maxColumnHeight = currentColumnHeight;
@@ -603,18 +519,6 @@ enemylist.DrawWindow = function(settings)
 			imgui.Dummy({windowWidth, 0});
 		end
 
-		-- Save position if moved (with change detection to avoid spam)
-		local winPosX, winPosY = imgui.GetWindowPos();
-		if not gConfig.lockPositions then
-			if lastSavedPosX == nil or
-			   math.abs(winPosX - lastSavedPosX) > 1 or
-			   math.abs(winPosY - lastSavedPosY) > 1 then
-				gConfig.enemyListWindowPosX = winPosX;
-				gConfig.enemyListWindowPosY = winPosY;
-				lastSavedPosX = winPosX;
-				lastSavedPosY = winPosY;
-			end
-		end
 	end
 
 	-- Restore ImGui style variables (must be before End() to avoid affecting other windows)
@@ -654,19 +558,6 @@ end
 enemylist.HandleZonePacket = function(e)
 	-- Empty all our claimed targets on zone
 	allClaimedTargets = T{};
-
-	-- Clear background primitives on zone
-	for k, v in pairs(enemyBackgrounds) do
-		if (v ~= nil) then v:destroy(); end
-	end
-	enemyBackgrounds = {};
-	for k, v in pairs(enemyTargetBackgrounds) do
-		if (v ~= nil) then v:destroy(); end
-	end
-	enemyTargetBackgrounds = {};
-
-	-- Reset active indices and name caches
-	activeEnemyIndices = {};
 	truncatedNameCache = {};
 	truncatedTargetNameCache = {};
 end
@@ -682,39 +573,21 @@ enemylist.UpdateVisuals = function(settings)
 end
 
 enemylist.SetHidden = function(hidden)
-	if hidden then
-		-- Hide all background primitives
-		for _, bgObj in pairs(enemyBackgrounds) do
-			bgObj.visible = false;
-		end
-		for _, bgObj in pairs(enemyTargetBackgrounds) do
-			bgObj.visible = false;
-		end
-		-- Clear active indices so next DrawWindow starts fresh
-		activeEnemyIndices = {};
-	end
 end
 
 enemylist.Cleanup = function()
-	-- Destroy all background primitives
-	for k, v in pairs(enemyBackgrounds) do
-		if (v ~= nil) then v:destroy(); end
-	end
-	for k, v in pairs(enemyTargetBackgrounds) do
-		if (v ~= nil) then v:destroy(); end
-	end
-
-	-- Clear all tables
-	enemyBackgrounds = {};
-	enemyTargetBackgrounds = {};
-	activeEnemyIndices = {};
 	truncatedNameCache = {};
 	truncatedTargetNameCache = {};
 end
 
 enemylist.ResetPositions = function()
-	forcePositionReset = true;
-	hasAppliedSavedPosition = false;
+	local defX, defY = defaultPositions.GetEnemyListPosition();
+	if gConfig.windowPositions then
+		gConfig.windowPositions['EnemyList'] = { x = defX, y = defY };
+	end
+	if gConfig.appliedPositions then
+		gConfig.appliedPositions['EnemyList'] = nil;
+	end
 end
 
 return enemylist;

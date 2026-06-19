@@ -125,7 +125,6 @@ function M.MigratePartyListLayoutSettings(gConfig, defaults)
             hpBarWidth = 150,
             mpBarWidth = 100,
             tpBarWidth = 100,
-            barHeight = 20,
             barSpacing = 8,
 
             nameTextOffsetX = 1,
@@ -608,6 +607,44 @@ function M.MigrateIndividualSettings(gConfig, defaults)
             if petType.tpFontSize == nil then petType.tpFontSize = oldVitalsFontSize; end
         end
     end
+
+    -- Hotbar anchored layout settings
+    M.MigrateHotbarLayoutSettings(gConfig, defaults);
+end
+
+function M.MigrateHotbarLayoutSettings(gConfig, defaults)
+    local globalDefaults = defaults.hotbarGlobal or {};
+    local globalSettings = gConfig.hotbarGlobal;
+    if globalSettings then
+        if globalSettings.positionMode == nil then
+            globalSettings.positionMode = globalDefaults.positionMode or 'absolute';
+        end
+        if globalSettings.backgroundPaddingX == nil then
+            globalSettings.backgroundPaddingX = globalDefaults.backgroundPaddingX or 0;
+        end
+        if globalSettings.backgroundPaddingY == nil then
+            globalSettings.backgroundPaddingY = globalDefaults.backgroundPaddingY or 0;
+        end
+        if globalSettings.hotbarSpacing == nil then
+            globalSettings.hotbarSpacing = globalDefaults.hotbarSpacing or 0;
+        end
+    end
+
+    for barIndex = 1, 6 do
+        local barCfg = gConfig['hotbarBar' .. barIndex];
+        local barDefaults = defaults['hotbarBar' .. barIndex] or {};
+        if barCfg then
+            if barCfg.anchoredInStack == nil then
+                barCfg.anchoredInStack = barDefaults.anchoredInStack ~= false;
+            end
+            if barCfg.backgroundPaddingX == nil then
+                barCfg.backgroundPaddingX = barDefaults.backgroundPaddingX or 0;
+            end
+            if barCfg.backgroundPaddingY == nil then
+                barCfg.backgroundPaddingY = barDefaults.backgroundPaddingY or 0;
+            end
+        end
+    end
 end
 
 -- Migrate flat castCost* settings to nested castCost table
@@ -850,6 +887,208 @@ function M.MigrateCrossbarComboModeSettings(gConfig, defaults)
     end
 end
 
+-- Migrate legacy per-module *WindowPosX/Y fields into the unified windowPositions table
+-- This ensures old profiles don't retain stale position data that could conflict
+function M.MigrateLegacyPositionFields(gConfig)
+    if not gConfig then return; end
+
+    -- Map of legacy field name pairs to windowPositions key
+    local legacyFields = {
+        { xKey = 'playerBarWindowPosX',   yKey = 'playerBarWindowPosY',   windowName = 'PlayerBar' },
+        { xKey = 'targetBarWindowPosX',   yKey = 'targetBarWindowPosY',   windowName = 'TargetBar' },
+        { xKey = 'castBarWindowPosX',     yKey = 'castBarWindowPosY',     windowName = 'CastBar' },
+        { xKey = 'enemyListWindowPosX',   yKey = 'enemyListWindowPosY',   windowName = 'EnemyList' },
+        { xKey = 'partyListWindowPosX',   yKey = 'partyListWindowPosY',   windowName = 'PartyList' },
+        { xKey = 'partyList2WindowPosX',  yKey = 'partyList2WindowPosY',  windowName = 'PartyList2' },
+        { xKey = 'partyList3WindowPosX',  yKey = 'partyList3WindowPosY',  windowName = 'PartyList3' },
+        { xKey = 'expBarWindowPosX',      yKey = 'expBarWindowPosY',      windowName = 'ExpBar' },
+        { xKey = 'gilTrackerWindowPosX',  yKey = 'gilTrackerWindowPosY',  windowName = 'GilTracker' },
+        { xKey = 'treasurePoolWindowPosX', yKey = 'treasurePoolWindowPosY', windowName = 'TreasurePool' },
+        { xKey = 'petBarWindowPosX',      yKey = 'petBarWindowPosY',      windowName = 'PetBar' },
+        { xKey = 'notificationsWindowPosX', yKey = 'notificationsWindowPosY', windowName = 'Notifications_Group1' },
+        { xKey = 'crossbarWindowPosX',    yKey = 'crossbarWindowPosY',    windowName = 'Crossbar' },
+    };
+
+    local migrated = false;
+
+    for _, entry in ipairs(legacyFields) do
+        local x = gConfig[entry.xKey];
+        local y = gConfig[entry.yKey];
+
+        if x ~= nil and y ~= nil then
+            -- Migrate to windowPositions if no entry exists yet
+            if not gConfig.windowPositions then gConfig.windowPositions = {}; end
+            if not gConfig.windowPositions[entry.windowName] then
+                gConfig.windowPositions[entry.windowName] = { x = x, y = y };
+            end
+            migrated = true;
+        end
+
+        -- Always clear the legacy fields
+        gConfig[entry.xKey] = nil;
+        gConfig[entry.yKey] = nil;
+    end
+
+    -- Handle nested castCost.windowPosX/Y
+    if gConfig.castCost then
+        local ccX = gConfig.castCost.windowPosX;
+        local ccY = gConfig.castCost.windowPosY;
+        if ccX ~= nil and ccY ~= nil then
+            if not gConfig.windowPositions then gConfig.windowPositions = {}; end
+            if not gConfig.windowPositions['CastCost'] then
+                gConfig.windowPositions['CastCost'] = { x = ccX, y = ccY };
+            end
+            migrated = true;
+        end
+        gConfig.castCost.windowPosX = nil;
+        gConfig.castCost.windowPosY = nil;
+    end
+
+    -- Handle legacy hotbarCrossbarPosition table
+    if gConfig.hotbarCrossbarPosition then
+        local pos = gConfig.hotbarCrossbarPosition;
+        if pos.x and pos.y then
+            if not gConfig.windowPositions then gConfig.windowPositions = {}; end
+            if not gConfig.windowPositions['Crossbar'] then
+                gConfig.windowPositions['Crossbar'] = { x = pos.x, y = pos.y };
+            end
+            migrated = true;
+        end
+        gConfig.hotbarCrossbarPosition = nil;
+    end
+
+    -- Handle legacy inventoryWindowPosX/Y (doesn't directly map, just clean up)
+    gConfig.inventoryWindowPosX = nil;
+    gConfig.inventoryWindowPosY = nil;
+
+    -- Handle legacy hotbarBarPositions (per-bar position table)
+    if gConfig.hotbarBarPositions then
+        if not gConfig.windowPositions then gConfig.windowPositions = {}; end
+        for barIndex, pos in pairs(gConfig.hotbarBarPositions) do
+            if pos.x and pos.y then
+                local windowName = string.format('Hotbar%d', barIndex);
+                if not gConfig.windowPositions[windowName] then
+                    gConfig.windowPositions[windowName] = { x = pos.x, y = pos.y };
+                end
+                migrated = true;
+            end
+        end
+        gConfig.hotbarBarPositions = nil;
+    end
+
+    return migrated;
+end
+
+-- Migrates legacy slot data so macroDB is the single source of truth:
+--   1. Fills in missing macroPaletteKey on slots that have macroRef.
+--      Uses the macroDB to determine which palette the macro lives in.
+--      Disambiguates ambiguous matches via the slot's storage-key job context,
+--      then 'global', then leaves it for the cross-palette fallback.
+--   2. Strips the duplicated cached macro fields (action, macroText, etc.)
+--      from any slot that has a macroRef.
+-- Idempotent and cheap: safe to run on every load. Doubles as an integrity
+-- check in case external tools or future bugs re-introduce duplicate fields.
+function M.MigrateSlotMacroRefs(gConfig)
+    if not gConfig or not gConfig.macroDB then return 0, 0; end
+
+    -- Build id -> { palette_key, ... } map from macroDB
+    local idToKeys = {};
+    for paletteKey, palette in pairs(gConfig.macroDB) do
+        if type(palette) == 'table' then
+            for _, macro in ipairs(palette) do
+                if macro and macro.id then
+                    if not idToKeys[macro.id] then
+                        idToKeys[macro.id] = {};
+                    end
+                    table.insert(idToKeys[macro.id], paletteKey);
+                end
+            end
+        end
+    end
+
+    local FIELDS_TO_STRIP = {
+        'actionType', 'action', 'target', 'displayName',
+        'equipSlot', 'macroText', 'itemId',
+        'customIconType', 'customIconId', 'customIconPath',
+        'recastSourceType', 'recastSourceAction', 'recastSourceItemId',
+    };
+
+    local keysAdded = 0;
+    local fieldsStripped = 0;
+
+    local function migrateSlot(slot, contextStorageKey)
+        if type(slot) ~= 'table' then return; end
+        if not slot.macroRef then return; end
+
+        -- Fill in missing macroPaletteKey
+        if not slot.macroPaletteKey then
+            local candidates = idToKeys[slot.macroRef];
+            local chosen = nil;
+            if candidates and #candidates == 1 then
+                chosen = candidates[1];
+            elseif candidates and #candidates > 1 then
+                -- Disambiguate using storage key job context (e.g. '14:0:palette:Default')
+                local jobId = contextStorageKey
+                    and tonumber(tostring(contextStorageKey):match('^(%d+)'));
+                if jobId then
+                    for _, k in ipairs(candidates) do
+                        if k == jobId then chosen = k; break; end
+                    end
+                end
+                if not chosen then
+                    for _, k in ipairs(candidates) do
+                        if k == 'global' then chosen = k; break; end
+                    end
+                end
+                -- Else: too ambiguous, leave for runtime cross-palette fallback
+            end
+            if chosen ~= nil then
+                slot.macroPaletteKey = chosen;
+                keysAdded = keysAdded + 1;
+            end
+        end
+
+        -- Strip duplicated macro fields (macroDB is now the source of truth)
+        for _, field in ipairs(FIELDS_TO_STRIP) do
+            if slot[field] ~= nil then
+                slot[field] = nil;
+                fieldsStripped = fieldsStripped + 1;
+            end
+        end
+    end
+
+    -- Hotbar slots: gConfig.hotbarBarN.slotActions[storageKey][slotIndex]
+    for barIndex = 1, 6 do
+        local barCfg = gConfig['hotbarBar' .. barIndex];
+        if barCfg and type(barCfg.slotActions) == 'table' then
+            for storageKey, slots in pairs(barCfg.slotActions) do
+                if type(slots) == 'table' then
+                    for _, slot in pairs(slots) do
+                        migrateSlot(slot, storageKey);
+                    end
+                end
+            end
+        end
+    end
+
+    -- Crossbar slots: gConfig.hotbarCrossbar.slotActions[storageKey][comboMode][slotIndex]
+    if gConfig.hotbarCrossbar and type(gConfig.hotbarCrossbar.slotActions) == 'table' then
+        for storageKey, comboModes in pairs(gConfig.hotbarCrossbar.slotActions) do
+            if type(comboModes) == 'table' then
+                for _, slots in pairs(comboModes) do
+                    if type(slots) == 'table' then
+                        for _, slot in pairs(slots) do
+                            migrateSlot(slot, storageKey);
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    return keysAdded, fieldsStripped;
+end
+
 -- Run structure migrations (called AFTER settings.load())
 -- These handle migrating old settings structures to new ones
 function M.RunStructureMigrations(gConfig, defaults)
@@ -864,6 +1103,8 @@ function M.RunStructureMigrations(gConfig, defaults)
     M.MigrateBlockedGameKeys(gConfig, defaults);
     M.MigrateNotificationGroups(gConfig, defaults);
     M.MigrateCrossbarComboModeSettings(gConfig, defaults);
+    M.MigrateLegacyPositionFields(gConfig);
+    M.MigrateSlotMacroRefs(gConfig);
 end
 
 -- Legacy function for backward compatibility (if any external code calls it)

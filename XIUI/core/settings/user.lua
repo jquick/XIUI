@@ -14,34 +14,8 @@ local M = {};
 function M.createUserSettingsDefaults()
     return T{
         lockPositions = false,
-        tooltipScale = 1.0,
+        globalScale = 1.0,
         hideDuringEvents = true,
-
-        -- Window positions (saved when user moves windows, nil = use defaults)
-        playerBarWindowPosX = nil,
-        playerBarWindowPosY = nil,
-        targetBarWindowPosX = nil,
-        targetBarWindowPosY = nil,
-        castBarWindowPosX = nil,
-        castBarWindowPosY = nil,
-        enemyListWindowPosX = nil,
-        enemyListWindowPosY = nil,
-        partyListWindowPosX = nil,
-        partyListWindowPosY = nil,
-        partyList2WindowPosX = nil,
-        partyList2WindowPosY = nil,
-        partyList3WindowPosX = nil,
-        partyList3WindowPosY = nil,
-        expBarWindowPosX = nil,
-        expBarWindowPosY = nil,
-        gilTrackerWindowPosX = nil,
-        gilTrackerWindowPosY = nil,
-        inventoryWindowPosX = nil,  -- Shared by all inventory container types
-        inventoryWindowPosY = nil,
-        treasurePoolWindowPosX = nil,
-        treasurePoolWindowPosY = nil,
-        notificationsWindowPosX = nil,
-        notificationsWindowPosY = nil,
 
         showPlayerBar = true,
         showTargetBar = true,
@@ -54,6 +28,13 @@ function M.createUserSettingsDefaults()
         showPetBar = true,
         showCastCost = true,
         showNotifications = true,
+        showReadyCheck = true,
+
+        -- Ready Check module settings (per profile)
+        readyCheckSoundFile = 'ffxiv-notification.wav',
+        readyCheckSoundOnChecker = true,
+        readyCheckSoundOnPrompt = true,
+        readyCheckSoundVolume = 50,
 
         -- Hide when game menu is open (default off)
         playerBarHideOnMenuFocus = false,
@@ -70,6 +51,22 @@ function M.createUserSettingsDefaults()
         treasurePoolHideOnMenuFocus = false,
         hotbarHideOnMenuFocus = false,
         mobInfoHideOnMenuFocus = false,
+
+        playerBarHideMacroPalette = false,
+        targetBarHideMacroPalette = false,
+        enemyListHideMacroPalette = false,
+        expBarHideMacroPalette = false,
+        gilTrackerHideMacroPalette = false,
+        inventoryTrackerHideMacroPalette = false,
+        partyListHideMacroPalette = false,
+        partyListHideOnlyAllianceOnMenuFocus = false,
+        castBarHideMacroPalette = false,
+        petBarHideMacroPalette = false,
+        castCostHideMacroPalette = false,
+        notificationsHideMacroPalette = false,
+        treasurePoolHideMacroPalette = false,
+        hotbarHideMacroPalette = false,
+        mobInfoHideMacroPalette = false,
 
         -- Treasure Pool settings
         treasurePoolEnabled = true,           -- Show treasure pool when items in pool
@@ -92,9 +89,6 @@ function M.createUserSettingsDefaults()
         -- Lock movement: when true, disables drag/drop and slot swapping for hotbar bars
         hotbarLockMovement = false,
         hotbarPreview = false,                -- Show preview with test data
-        hotbarBarPositions = nil,             -- Per-bar positions (nil = defaults)
-        crossbarWindowPosX = nil,             -- Crossbar X position
-        crossbarWindowPosY = nil,             -- Crossbar Y position
 
         -- Global hotbar visual settings (used when bar's useGlobalSettings = true)
         hotbarGlobal = factories.createHotbarGlobalDefaults(),
@@ -334,6 +328,7 @@ function M.createUserSettingsDefaults()
         expBarShowPercent = true,
         expBarInlineMode = false,
         expBarLimitPointsMode = false,
+        expBarMasteryMode = false,
         -- Text position offsets (relative to default positions)
         expBarJobTextOffsetX = 0,
         expBarJobTextOffsetY = 0,
@@ -478,7 +473,6 @@ function M.createUserSettingsDefaults()
             hpBarWidth = 150,
             mpBarWidth = 100,
             tpBarWidth = 100,
-            barHeight = 20,
             barSpacing = 8,
             nameTextOffsetX = 1,
             nameTextOffsetY = 0,
@@ -494,7 +488,6 @@ function M.createUserSettingsDefaults()
             hpBarWidth = 200,
             mpBarWidth = 120,
             tpBarWidth = 0,
-            barHeight = 20,
             barSpacing = 8,
             nameTextOffsetX = 1,
             nameTextOffsetY = 0,
@@ -574,7 +567,6 @@ function M.createUserSettingsDefaults()
             hpBarWidth = 150,
             mpBarWidth = 100,
             tpBarWidth = 100,
-            barHeight = 20,
             barSpacing = 8,
             hpBarScaleX = 1,
             mpBarScaleX = 1,
@@ -642,7 +634,6 @@ function M.createUserSettingsDefaults()
             hpBarWidth = 200,
             mpBarWidth = 120,
             tpBarWidth = 0,
-            barHeight = 20,
             barSpacing = 8,
             hpBarScaleX = 0.9,
             mpBarScaleX = 0.6,
@@ -696,9 +687,6 @@ function M.createUserSettingsDefaults()
         petBarScaleY = 1.0,
         petBarHideDuringEvents = true,
         petBarPreview = true,
-        -- Window positions (saved when user moves window)
-        petBarWindowPosX = nil,
-        petBarWindowPosY = nil,
         petBarPreviewType = 2, -- Avatar (SMN)
         petBarShowDistance = true,
         petBarShowTarget = true,
@@ -804,6 +792,8 @@ function M.createUserSettingsDefaults()
         petBarHpDisplayMode = 'percent', -- 'percent', 'number'
         petBarTargetFontSize = 10,
         petTargetBackgroundTheme = nil,  -- Uses petBarBackgroundTheme by default
+        petTargetBgScale = 1.0,
+        petTargetBorderScale = 1.0,
         petTargetBackgroundOpacity = 1.0,
         petTargetBorderOpacity = 1.0,
         petTargetBarScaleX = 1.0,
