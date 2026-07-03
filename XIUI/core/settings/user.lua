@@ -308,6 +308,7 @@ function M.createUserSettingsDefaults()
         enemyListIconScale = 1,
         showEnemyDistance = true,
         showEnemyHPPText = true,
+        showEnemyListCastBar = true,
         showEnemyListBookends = false,
         showEnemyListBorders = true,
         showEnemyListBordersUseNameColor = false,

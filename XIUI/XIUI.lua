@@ -87,6 +87,7 @@ local commandHelp = require('libs.help');
 local debuffHandler = require('handlers.debuffhandler');
 local petBuffHandler = require('handlers.petbuffhandler');
 local actionTracker = require('handlers.actiontracker');
+local enemyCasts = require('handlers.enemycasts');
 local mobInfo = require('modules.mobinfo.init');
 local statusHandler = require('handlers.statushandler');
 local progressbar = require('libs.progressbar');
@@ -96,7 +97,7 @@ local imtext = require('libs.imtext');
 local components = require('config.components');
 
 -- Global switch to hard-disable functionality that is limited on HX servers
-HzLimitedMode = true;
+HzLimitedMode = false;
 
 -- Flag to skip settings_update callback during internal saves
 local bInternalSave = false;
@@ -1690,6 +1691,12 @@ ashita.events.register('text_in', 'readycheck_text_in_cb', function (e)
     end
 end);
 
+-- Enemy cast bars (target bar + enemy list) share one packet-driven tracker.
+local function enemyCastTrackingEnabled()
+    return not HzLimitedMode and ((gConfig.showTargetBar and gConfig.showTargetBarCastBar)
+        or (gConfig.showEnemyList and gConfig.showEnemyListCastBar));
+end
+
 ashita.events.register('packet_in', 'packet_in_cb', function (e)
     if satchelModule.HandlePacketIn then
         satchelModule.HandlePacketIn(e);
@@ -1712,9 +1719,7 @@ ashita.events.register('packet_in', 'packet_in_cb', function (e)
         if actionPacket then
             if gConfig.showEnemyList then enemyList.HandleActionPacket(actionPacket); end
             if gConfig.showCastBar then castBar.HandleActionPacket(actionPacket); end
-            if gConfig.showTargetBar and gConfig.showTargetBarCastBar and not HzLimitedMode then
-                targetBar.HandleActionPacket(actionPacket);
-            end
+            if enemyCastTrackingEnabled() then enemyCasts.HandleActionPacket(actionPacket); end
             if gConfig.showPartyList then partyList.HandleActionPacket(actionPacket); end
             debuffHandler.HandleActionPacket(actionPacket);
             petBuffHandler.HandleActionPacket(actionPacket);
@@ -1734,6 +1739,7 @@ ashita.events.register('packet_in', 'packet_in_cb', function (e)
         notifications.HandleZonePacket();
         treasurePool.HandleZonePacket();
         enemyList.HandleZonePacket(e);
+        enemyCasts.HandleZonePacket();
         partyList.HandleZonePacket(e);
         debuffHandler.HandleZonePacket(e);
         petBuffHandler.HandleZonePacket();
@@ -1755,6 +1761,7 @@ ashita.events.register('packet_in', 'packet_in_cb', function (e)
         if messagePacket then
             debuffHandler.HandleMessagePacket(messagePacket);
             petBuffHandler.HandleMessagePacket(messagePacket);
+            if enemyCastTrackingEnabled() then enemyCasts.HandleMessagePacket(messagePacket); end
             if gConfig.showNotifications then
                 notifications.HandleMessagePacket(e, messagePacket, 0x0029);
             end
