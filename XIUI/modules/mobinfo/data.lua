@@ -23,6 +23,16 @@ local function GetMobDataPath()
     return path .. '/submodules/mobdb/addons/mobdb/data/';
 end
 
+-- Horizon-specific mob data overrides (Dynamis zone name/job changes for the
+-- HorizonXI rebase). Only a handful of zones exist here; any zone not present
+-- falls back to the base MobDB data above.
+-- Source: https://github.com/Mr-Sithel/HorizonXI-Dynamis-Mobdb (edits by Mr-Sithel,
+-- original MobDB data by Thorny).
+local function GetHorizonMobDataPath()
+    local path = string.gsub(addon.path, '\\\\', '\\');
+    return path .. '/submodules/mobdb_horizon/mobdb/data/';
+end
+
 --[[
     Load mob data for a specific zone
     @param zoneId: The zone ID to load data for
@@ -44,8 +54,17 @@ mobdata.LoadZone = function(zoneId)
         return false;
     end
 
-    -- Construct file path
+    -- Construct file path. On Horizon, prefer the Dynamis override data if it
+    -- exists for this zone; otherwise fall back to the base MobDB data.
     local filePath = GetMobDataPath() .. tostring(zoneId) .. '.lua';
+    if HzLimitedMode then
+        local hzPath = GetHorizonMobDataPath() .. tostring(zoneId) .. '.lua';
+        local hzFile = io.open(hzPath, 'r');
+        if hzFile ~= nil then
+            hzFile:close();
+            filePath = hzPath;
+        end
+    end
 
     -- Check if file exists
     local file = io.open(filePath, 'r');
