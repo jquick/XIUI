@@ -71,8 +71,10 @@ local IGNORED_MENUS = {
 };
 
 local MACRO_PALETTE_MENUS = {
-    mcr1pall = true,  -- Macro palette page 1
-    mcr2pall = true,  -- Macro palette page 2
+    mcr1pall = true,  -- Compact Palette Size
+    mcr2pall = true,
+    mcr1long = true,  -- Full Palette Size
+    mcr2long = true,
 };
 
 function M.GetMenuShortName()
