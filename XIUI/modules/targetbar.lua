@@ -43,6 +43,23 @@ local function IsPet(idx, pEnt)
 	return pEnt and pEnt.PetTargetIndex and pEnt.PetTargetIndex ~= 0 and idx == pEnt.PetTargetIndex;
 end
 
+-- Main bar shows the held target while the subtarget bar is enabled; otherwise show the subtarget cursor.
+local function GetMainBarTargetIndex()
+	local mainIndex, secondaryIndex = GetTargets();
+	if gConfig.showSubtargetBar or not GetSubTargetActive() then
+		return mainIndex;
+	end
+	-- Party cursor mode (<stal>/<stpt>): main index is already the subtarget.
+	if GetStPartyIndex() ~= nil then
+		return mainIndex;
+	end
+	-- Entity subtargeting with a held target: GetTargets() swap puts the cursor on secondary.
+	if secondaryIndex ~= nil and secondaryIndex ~= 0 then
+		return secondaryIndex;
+	end
+	return mainIndex;
+end
+
 -- Get HP gradient key based on entity type (for per-type HP bar coloring)
 local function GetEntityHpGradientKey(entity, index)
 	if entity == nil then return 'hpGradientMob'; end
@@ -77,7 +94,7 @@ targetbar.DrawWindow = function(settings)
 	local targetIndex;
 	local targetEntity;
 	if (playerTarget ~= nil) then
-		targetIndex, _ = GetTargets();
+		targetIndex = GetMainBarTargetIndex();
 		targetEntity = GetEntity(targetIndex);
 	end
     if (targetEntity == nil or targetEntity.Name == nil) then
@@ -687,7 +704,7 @@ targetbar.DrawWindow = function(settings)
 	if (gConfig.showSubtargetBar) then
 		local subTargetActive = GetSubTargetActive();
 		local _, secondaryTargetIndex = GetTargets();
-		-- After GetTargets() swap: secondaryTargetIndex = subtarget cursor (what you're selecting)
+		-- After GetTargets() swap: secondaryTargetIndex = subtarget cursor in entity mode, held target in party cursor mode
 
 		if (subTargetActive and secondaryTargetIndex ~= nil and secondaryTargetIndex ~= 0) then
 			local subtargetEntity = GetEntity(secondaryTargetIndex);
@@ -785,7 +802,7 @@ targetbar.DrawWindow = function(settings)
 		local targetIndex;
 		local targetEntity;
 		if (playerTarget ~= nil) then
-			targetIndex, _ = GetTargets();
+			targetIndex = GetMainBarTargetIndex();
 			targetEntity = GetEntity(targetIndex);
 		end
 		if (targetEntity == nil or targetEntity.Name == nil) then
