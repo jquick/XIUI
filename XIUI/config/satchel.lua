@@ -5,6 +5,7 @@
 require('common');
 local imgui = require('imgui');
 local components = require('config.components');
+local tooltips = require('modules.satchel.tooltips');
 
 local M = {};
 
@@ -33,9 +34,9 @@ function M.DrawSettings()
 
     components.DrawCheckbox('Auto Sort Bags', 'satchelAutoSortBags');
     if HzLimitedMode then
-        imgui.ShowHelp('Always keep inventory bags visually sorted in Satchel (client-side display order).');
+        imgui.ShowHelp('Always keep inventory bags visually sorted in Satchel (client-side display order only).');
     else
-        imgui.ShowHelp('Always keep inventory bags visually sorted in Satchel (client-side display order). Also merges stackable items when you manually sort a bag.');
+        imgui.ShowHelp('Always keep inventory bags visually sorted in Satchel, and send server-side sort to merge stackable items. Manual Sort Bag does the same for one bag.');
     end
 
     if components.CollapsingSection('Layout##satchelModule') then
@@ -45,18 +46,62 @@ function M.DrawSettings()
         components.DrawCheckbox('Hide Empty Slots', 'satchelHideEmptySlots');
     end
 
-    if components.CollapsingSection('Tooltips##satchelModule') then
-        components.DrawComboBox('Tooltip Font', gConfig.satchelTooltipFontFamily, components.available_tooltip_fonts, function(newValue)
-            gConfig.satchelTooltipFontFamily = newValue;
-            SaveSettingsOnly();
-        end);
-        imgui.ShowHelp('Font for Satchel item tooltips. Independent from the Global tab font. Agave matches Ashita\'s default ImGui font.');
+    if components.CollapsingSection('Tooltips##satchelModuleTooltips') then
+        local font_preview = tooltips.font_display_name(gConfig.satchelTooltipFontFamily);
 
-        components.DrawSlider('Tooltip Scale', 'satchelTooltipScale', 0.1, 5.0, '%.2f');
-        imgui.ShowHelp('Sharp tooltip text scaling via font size (not window stretch). 1.0 matches the 14px baseline.');
+        imgui.SetNextItemWidth(components.CONTENT_MAX_WIDTH);
+        if imgui.BeginCombo('Tooltip Font', font_preview) then
+            for i = 1, #components.available_tooltip_fonts do
+                local font_name = components.available_tooltip_fonts[i];
+                local label = tooltips.font_display_name(font_name);
+                local is_selected = font_name == gConfig.satchelTooltipFontFamily;
+                if imgui.Selectable(label, is_selected) and not is_selected then
+                    gConfig.satchelTooltipFontFamily = font_name;
+                    SaveSettingsOnly();
+                    tooltips.notify_font_changed();
+                end
+                if is_selected then
+                    imgui.SetItemDefaultFocus();
+                end
+            end
+            imgui.EndCombo();
+        end
+        imgui.ShowHelp('Font for Satchel item tooltips. Independent from the Global tab font.');
 
-        components.DrawCheckbox('Tooltip Icons As Words', 'satchelTooltipIconsAsWords');
-        imgui.ShowHelp('When enabled, inline tooltip icons (elements and item tags) are shown as colored words with row-packed layout.');
+        local current_size = tooltips.normalize_font_size(gConfig.satchelTooltipFontSize);
+        local size_preview = tooltips.label_for_font_size(current_size);
+
+        imgui.SetNextItemWidth(components.CONTENT_MAX_WIDTH);
+        if imgui.BeginCombo('Tooltip Font Size', size_preview) then
+            for i = 1, #tooltips.FONT_SIZES do
+                local size = tooltips.FONT_SIZES[i];
+                local label = tooltips.label_for_font_size(size);
+                local is_selected = size == current_size;
+                if imgui.Selectable(label, is_selected) and not is_selected then
+                    gConfig.satchelTooltipFontSize = size;
+                    SaveSettingsOnly();
+                    tooltips.notify_size_changed();
+                end
+                if is_selected then
+                    imgui.SetItemDefaultFocus();
+                end
+            end
+            imgui.EndCombo();
+        end
+        imgui.ShowHelp('Exact tooltip font size. Each size is a sharp raster font (not stretched).');
+
+        if components.CollapsingSection('Experimental##satchelTooltipExperimental') then
+            imgui.PushTextWrapPos(0);
+            imgui.TextColored(
+                { 0.95, 0.32, 0.32, 1.0 },
+                'Features may not work as intended and can cause addon crashes.'
+            );
+            imgui.PopTextWrapPos();
+            imgui.Spacing();
+
+            components.DrawCheckbox('Tooltip Icons As Words', 'satchelTooltipIconsAsWords');
+            imgui.ShowHelp('When enabled, inline tooltip icons (elements and item tags) are shown as colored words with row-packed layout.');
+        end
     end
 
     if components.CollapsingSectionWarning('Reset##satchelModule', false) then
@@ -67,10 +112,12 @@ function M.DrawSettings()
             gConfig.satchelSlotSize = 40;
             gConfig.satchelHideEmptySlots = false;
             gConfig.satchelTooltipIconsAsWords = false;
-            gConfig.satchelTooltipFontFamily = 'Agave';
-            gConfig.satchelTooltipScale = 1.0;
+            gConfig.satchelTooltipFontFamily = 'Consolas';
+            gConfig.satchelTooltipFontSize = 14;
+            gConfig.satchelTooltipScale = nil;
             gConfig.satchelAutoSortBags = false;
             SaveSettingsOnly();
+            tooltips.notify_font_changed();
         end
     end
 end
@@ -86,6 +133,7 @@ function M.DrawColorSettings()
         components.DrawTextColorPicker('Empty Slot', colors, 'emptySlotBorderColor', 'Border color for empty inventory slots.');
         components.DrawTextColorPicker('Locked Slot', colors, 'lockedSlotBorderColor', 'Border color for locked or unavailable slots.');
         components.DrawTextColorPicker('Bazaar Listed', colors, 'bazaarBorderColor', 'Border color for items listed in the bazaar.');
+        components.DrawTextColorPicker('Equipped', colors, 'equippedBorderColor', 'Border color for items currently equipped from inventory or wardrobes.');
         components.DrawTextColorPicker('Equipment', colors, 'equipmentBorderColor', 'Border color for weapons and armor.');
         components.DrawTextColorPicker('Usable', colors, 'usableBorderColor', 'Border color for usable items.');
         components.DrawTextColorPicker('Other Items', colors, 'itemBorderColor', 'Border color for all other item types.');

@@ -66,13 +66,16 @@ local function build_live_snapshot()
 
         for slot_index = 1, DISPLAY_SLOTS do
             local item_id = 0
+            local item_count = 0
             if slot_index <= limit then
                 local ok, item = pcall(inv.GetContainerItem, inv, container_id, slot_index)
                 if ok and item and item.Id and item.Id > 0 and item.Id ~= 65535 then
                     item_id = tonumber(item.Id) or 0
+                    item_count = math.max(1, tonumber(item.Count) or 1)
                 end
             end
-            slots[slot_index] = item_id
+            -- Store { id, count } so stacks survive in alt views; keep bare 0 for empty.
+            slots[slot_index] = item_id > 0 and { id = item_id, count = item_count } or 0
         end
 
         snapshot[tostring(container_id)] = slots
@@ -112,7 +115,12 @@ local function hash_snapshot(snapshot, slips, gil)
         local slots = snapshot[key]
         if slots then
             for slot_index = 1, DISPLAY_SLOTS do
-                parts[#parts + 1] = tostring(slots[slot_index] or 0)
+                local entry = slots[slot_index]
+                if type(entry) == 'table' then
+                    parts[#parts + 1] = tostring(entry.id or 0) .. 'x' .. tostring(entry.count or 1)
+                else
+                    parts[#parts + 1] = tostring(entry or 0)
+                end
             end
         end
     end
@@ -181,6 +189,20 @@ function altcache.tick()
     pending_save_at = now + SAVE_DEBOUNCE_SECONDS
 end
 
+local function read_cached_slot(entry)
+    if type(entry) == 'table' then
+        local item_id = tonumber(entry.id) or tonumber(entry[1]) or 0
+        local item_count = tonumber(entry.count) or tonumber(entry[2])
+        if item_id > 0 then
+            return item_id, math.max(1, item_count or 1)
+        end
+        return 0, 0
+    end
+
+    local item_id = tonumber(entry) or 0
+    return item_id, item_id > 0 and 1 or 0
+end
+
 function altcache.container_has_items(cache_entry, container_id)
     local cached_slots = cache_entry
         and cache_entry.containers
@@ -190,7 +212,8 @@ function altcache.container_has_items(cache_entry, container_id)
     end
 
     for slot_index = 1, DISPLAY_SLOTS do
-        if (tonumber(cached_slots[slot_index]) or 0) > 0 then
+        local item_id = read_cached_slot(cached_slots[slot_index])
+        if item_id > 0 then
             return true
         end
     end
@@ -246,16 +269,16 @@ function altcache.build_slots_from_cache(cache_entry, container_id)
     local cached_slots = cache_entry and cache_entry.containers and cache_entry.containers[key]
 
     for slot_index = 1, DISPLAY_SLOTS do
-        local item_id = 0
+        local item_id, item_count = 0, 0
         if cached_slots then
-            item_id = tonumber(cached_slots[slot_index]) or 0
+            item_id, item_count = read_cached_slot(cached_slots[slot_index])
         end
         slots[#slots + 1] = {
             container_id = container_id,
             slot_index = slot_index - 1,
             property_index = slot_index,
             id = item_id,
-            count = item_id > 0 and 1 or 0,
+            count = item_count,
             locked = false,
             read_only = true,
             alt_view = true,

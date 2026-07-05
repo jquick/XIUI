@@ -24,8 +24,11 @@ function settingslogic.create(ctx)
 
     function M.read_settings()
         -- Window visibility is session-only; layout fields live in gConfig.
+        -- Do not force-close windows here — UpdateVisuals calls this on global
+        -- font/scale edits and must leave open satchel windows alone.
+        local visible = satchel.visible and satchel.visible[1] == true
         satchel.settings = T{
-            visible = false,
+            visible = visible,
             columns = gConfig and gConfig.satchelColumns or default_settings.columns,
             rows = gConfig and gConfig.satchelRows or default_settings.rows,
             slot_size = gConfig and gConfig.satchelSlotSize or default_settings.slot_size,
@@ -39,9 +42,6 @@ function settingslogic.create(ctx)
         satchel.settings.columns = math.max(5, math.min(18, tonumber(satchel.settings.columns) or default_settings.columns))
         satchel.settings.rows = math.max(5, math.min(16, tonumber(satchel.settings.rows) or default_settings.rows))
         satchel.settings.slot_size = math.max(24, math.min(96, tonumber(satchel.settings.slot_size) or default_settings.slot_size))
-
-        satchel.visible[1] = false
-        satchel.last_visible = false
     end
 
     -- Re-sync config-owned display fields (not visibility) from gConfig when config

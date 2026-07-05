@@ -314,4 +314,617 @@ function M.blob_matches_query(blob, normalized, compact)
     return false
 end
 
+-- Animated search match borders (drawn on slot/window draw lists).
+local imgui = require('imgui')
+
+local SEARCH_HIGHLIGHT_COLOR = 0xFFD4AA44
+
+local last_clock_read = 0
+local cached_anim_offset = 0
+
+local function get_animation_offset()
+    local now = os.clock()
+    if now ~= last_clock_read then
+        last_clock_read = now
+        cached_anim_offset = (now * 50) % 16
+    end
+    return cached_anim_offset
+end
+
+local function draw_dashed_line(draw_list, x1, y1, x2, y2, color, thickness, dash_len, gap_len, offset)
+    local dx = x2 - x1
+    local dy = y2 - y1
+    local len = math.sqrt(dx * dx + dy * dy)
+    if len == 0 then
+        return
+    end
+
+    local nx = dx / len
+    local ny = dy / len
+    local total_len = dash_len + gap_len
+    local start_offset = offset % total_len
+    local pos = -start_offset
+
+    while pos < len do
+        local dash_start = math.max(0, pos)
+        local dash_end = math.min(len, pos + dash_len)
+
+        if dash_end > dash_start then
+            local sx = x1 + nx * dash_start
+            local sy = y1 + ny * dash_start
+            local ex = x1 + nx * dash_end
+            local ey = y1 + ny * dash_end
+            draw_list:AddLine({ sx, sy }, { ex, ey }, color, thickness)
+        end
+
+        pos = pos + total_len
+    end
+end
+
+function M.draw_match_border_rect(draw_list, x, y, w, h, opacity)
+    if not draw_list or not w or not h or w <= 0 or h <= 0 or (opacity or 1) <= 0.01 then
+        return
+    end
+
+    local color = SEARCH_HIGHLIGHT_COLOR
+    local anim_offset = get_animation_offset()
+    local alpha = math.floor(bit.rshift(bit.band(color, 0xFF000000), 24) * (opacity or 1))
+    local r = bit.rshift(bit.band(color, 0x00FF0000), 16) / 255
+    local g = bit.rshift(bit.band(color, 0x0000FF00), 8) / 255
+    local b = bit.band(color, 0x000000FF) / 255
+    local line_color = imgui.GetColorU32({ r, g, b, alpha / 255 })
+
+    local dash_len = 4
+    local gap_len = 4
+    local thickness = 2
+    -- Keep the stroke fully inside the slot so child/window clipping cannot cut it off.
+    local inset = thickness * 0.5
+    x = x + inset
+    y = y + inset
+    w = w - thickness
+    h = h - thickness
+    if w <= 0 or h <= 0 then
+        return
+    end
+
+    draw_dashed_line(draw_list, x, y, x + w, y, line_color, thickness, dash_len, gap_len, anim_offset)
+    draw_dashed_line(draw_list, x + w, y, x + w, y + h, line_color, thickness, dash_len, gap_len, anim_offset)
+    draw_dashed_line(draw_list, x + w, y + h, x, y + h, line_color, thickness, dash_len, gap_len, anim_offset)
+    draw_dashed_line(draw_list, x, y + h, x, y, line_color, thickness, dash_len, gap_len, anim_offset)
+end
+
+function M.draw_match_border(draw_list, x, y, size, opacity)
+    M.draw_match_border_rect(draw_list, x, y, size, size, opacity)
+end
+
+-- Profile search (lua / xml gear profiles).
+local name_index = nil
+local profile_cache = {} -- path -> { size = n, ids = { [id] = true } }
+local query_cache = {} -- query_key -> ids set
+
+local function install_path()
+    if not AshitaCore or not AshitaCore.GetInstallPath then
+        return nil
+    end
+    return AshitaCore:GetInstallPath():gsub('[/\\]+$', '') .. '\\'
+end
+
+local function trim(text)
+    if type(text) ~= 'string' then
+        return ''
+    end
+    return text:match('^%s*(.-)%s*$') or ''
+end
+
+local function lower(text)
+    return trim(text):lower()
+end
+
+local function get_player_context()
+    local mm = AshitaCore and AshitaCore:GetMemoryManager()
+    if not mm then
+        return nil
+    end
+
+    local party = mm:GetParty()
+    local player = mm:GetPlayer()
+    local entity = mm:GetEntity()
+    local rm = AshitaCore:GetResourceManager()
+    if not party or not player or not entity or not rm then
+        return nil
+    end
+
+    local index = party:GetMemberTargetIndex(0)
+    if not index then
+        return nil
+    end
+
+    -- Same identity key as layoutstate (entity server id, not party API).
+    local name = entity:GetName(index) or party:GetMemberName(0)
+    local server_id = tonumber(entity:GetServerId(index)) or 0
+    if type(name) ~= 'string' or name == '' or server_id <= 0 then
+        return nil
+    end
+
+    local job_id = tonumber(player:GetMainJob()) or 0
+    local job_abbr = ''
+    local ok, job_str = pcall(function()
+        return rm:GetString('jobs.names_abbr', job_id)
+    end)
+    if ok and type(job_str) == 'string' then
+        job_abbr = job_str:gsub('%z', ''):gsub('%s+', '')
+    end
+    if job_abbr == '' then
+        return nil
+    end
+
+    return {
+        name = name,
+        server_id = server_id,
+        job_abbr = job_abbr,
+        char_dir = ('%s_%d'):format(name, server_id),
+    }
+end
+
+function M.is_profile_query(query)
+    local q = lower(query)
+    if q == '' then
+        return false
+    end
+    local mode = q:match('^(%S+)')
+    return mode == 'lua' or mode == 'xml'
+end
+
+function M.parse_query(query)
+    local q = trim(query or '')
+    local mode, rest = q:match('^(%S+)%s*(.-)%s*$')
+    if not mode then
+        return nil, nil
+    end
+    mode = mode:lower()
+    if mode ~= 'lua' and mode ~= 'xml' then
+        return nil, nil
+    end
+    if rest == '' then
+        rest = nil
+    end
+    return mode, rest
+end
+
+local function list_dirs(path)
+    local entries = ashita.fs.get_directory(path)
+    if type(entries) ~= 'table' then
+        return {}
+    end
+    return entries
+end
+
+local function file_exists(path)
+    return type(path) == 'string' and path ~= '' and ashita.fs.exists(path) == true
+end
+
+local function file_size(path)
+    local f = io.open(path, 'rb')
+    if not f then
+        return nil
+    end
+    local size = f:seek('end')
+    f:close()
+    return size
+end
+
+local function read_file(path)
+    local f = io.open(path, 'rb')
+    if not f then
+        return nil
+    end
+    local data = f:read('*a')
+    f:close()
+    return data
+end
+
+local function append_ext(name, ext)
+    if type(name) ~= 'string' or name == '' then
+        return name
+    end
+    local lower_name = name:lower()
+    if lower_name:sub(-#ext) == ext:lower() then
+        return name
+    end
+    return name .. ext
+end
+
+local function find_file_ci(dir, filename)
+    if not file_exists(dir) then
+        return nil
+    end
+
+    local want = lower(filename)
+    local direct = dir .. filename
+    if file_exists(direct) then
+        return direct
+    end
+
+    -- Case-insensitive scan of direct children only.
+    local entries = ashita.fs.get_directory(dir, '.*') or list_dirs(dir)
+    for _, entry in ipairs(entries) do
+        if lower(entry) == want then
+            local path = dir .. entry
+            if file_exists(path) then
+                return path
+            end
+        end
+    end
+    return nil
+end
+
+local function prefer_candidate(candidates)
+    if #candidates == 0 then
+        return nil
+    end
+    if #candidates == 1 then
+        return candidates[1]
+    end
+
+    local best = candidates[1]
+    local best_size = file_size(best) or 0
+    for i = 2, #candidates do
+        local size = file_size(candidates[i]) or 0
+        if size >= best_size then
+            best = candidates[i]
+            best_size = size
+        end
+    end
+    return best
+end
+
+local function resolve_lua_path(player, arg)
+    local root = install_path()
+    if not root or not player then
+        return nil
+    end
+
+    local filename = arg and append_ext(arg, '.lua') or (player.job_abbr .. '.lua')
+    local addons_root = root .. 'config\\addons\\'
+    local want_char = lower(player.char_dir)
+    local candidates = {}
+
+    for _, addon_folder in ipairs(list_dirs(addons_root)) do
+        local addon_path = addons_root .. addon_folder .. '\\'
+        -- Match {Name}_{Id}\ case-insensitively among direct children only.
+        for _, child in ipairs(list_dirs(addon_path)) do
+            if lower(child) == want_char then
+                local char_dir = addon_path .. child .. '\\'
+                local path = find_file_ci(char_dir, filename)
+                if path then
+                    candidates[#candidates + 1] = path
+                end
+            end
+        end
+    end
+
+    return prefer_candidate(candidates)
+end
+
+local function resolve_xml_path(player, arg)
+    local root = install_path()
+    if not root or not player then
+        return nil
+    end
+
+    local filename
+    if not arg then
+        filename = ('%s_%s.xml'):format(player.name, player.job_abbr)
+    elseif not arg:find('_', 1, true) then
+        filename = ('%s_%s.xml'):format(player.name, arg)
+    else
+        filename = append_ext(arg, '.xml')
+    end
+
+    local config_root = root .. 'config\\'
+    local candidates = {}
+
+    for _, folder in ipairs(list_dirs(config_root)) do
+        local dir = config_root .. folder .. '\\'
+        local path = find_file_ci(dir, filename)
+        if path then
+            candidates[#candidates + 1] = path
+        end
+    end
+
+    return prefer_candidate(candidates)
+end
+
+local function strip_lua_comments(text)
+    text = text:gsub('%-%-%[%[.-%]%]', ' ')
+    text = text:gsub('%-%-[^\r\n]*', ' ')
+    return text
+end
+
+local function unescape_lua_string(text)
+    return (text:gsub('\\(.)', '%1'))
+end
+
+-- Extract quoted Lua strings, honoring \' and \".
+local function each_lua_string(text, callback)
+    local i = 1
+    local n = #text
+    while i <= n do
+        local c = text:sub(i, i)
+        if c == "'" or c == '"' then
+            local quote = c
+            local j = i + 1
+            local buf = {}
+            while j <= n do
+                local ch = text:sub(j, j)
+                if ch == '\\' and j < n then
+                    buf[#buf + 1] = text:sub(j, j + 1)
+                    j = j + 2
+                elseif ch == quote then
+                    callback(unescape_lua_string(table.concat(buf)))
+                    i = j + 1
+                    break
+                else
+                    buf[#buf + 1] = ch
+                    j = j + 1
+                end
+            end
+            if j > n then
+                break
+            end
+        else
+            i = i + 1
+        end
+    end
+end
+
+local function collect_lua_names(text)
+    local names = {}
+    local seen = {}
+
+    local function add_name(name)
+        name = trim(name)
+        if name == '' or name:sub(1, 1) == '$' then
+            return
+        end
+        -- Skip obvious non-items (paths, requires).
+        if name:find('[/\\]') or name:find('%.lua$') or name:find('^lib/') then
+            return
+        end
+        local key = lower(name)
+        if seen[key] then
+            return
+        end
+        seen[key] = true
+        names[#names + 1] = name
+    end
+
+    -- All quoted strings, including escaped apostrophes (Terra\'s Staff).
+    each_lua_string(text, function(name)
+        add_name(name)
+    end)
+
+    return names
+end
+
+local XML_EQUIP_TAGS = {
+    main = true, sub = true, range = true, ammo = true,
+    head = true, body = true, hands = true, legs = true, feet = true,
+    neck = true, waist = true, ear1 = true, ear2 = true,
+    ring1 = true, ring2 = true, rring = true, lring = true, back = true,
+}
+
+local function looks_like_item_name(text)
+    text = trim(text)
+    if text == '' or text:sub(1, 1) == '$' then
+        return false
+    end
+    if text:find('[<>]') then
+        return false
+    end
+    if #text < 2 or #text > 64 then
+        return false
+    end
+    -- Reject pure numbers / booleans / short codes.
+    if text:match('^[%d%.]+$') then
+        return false
+    end
+    if text == 'true' or text == 'false' then
+        return false
+    end
+    return true
+end
+
+local function collect_xml_names(text)
+    local names = {}
+    local seen = {}
+
+    local function add_name(name)
+        name = trim(name)
+        if not looks_like_item_name(name) then
+            return
+        end
+        local key = lower(name)
+        if seen[key] then
+            return
+        end
+        seen[key] = true
+        names[#names + 1] = name
+    end
+
+    for tag, value in text:gmatch('<([%w_]+)>([^<]*)</[%w_]+>') do
+        local tag_l = tag:lower()
+        if XML_EQUIP_TAGS[tag_l] then
+            add_name(value)
+        elseif tag_l == 'var' and looks_like_item_name(value) then
+            -- Staff/obi style tables often use <var>Item Name</var>.
+            if value:find('%s') or value:find('%+') or value:match('^[A-Z]') then
+                add_name(value)
+            end
+        end
+    end
+
+    return names
+end
+
+local function coerce_name(raw_name, item)
+    if type(raw_name) ~= 'string' or raw_name == '' then
+        return nil
+    end
+
+    local encoding = _G.encoding
+    local text = raw_name
+    if encoding and encoding.ShiftJIS_To_UTF8 then
+        local ok, converted = pcall(encoding.ShiftJIS_To_UTF8, encoding, text, true)
+        if ok and type(converted) == 'string' and converted ~= '' then
+            text = converted
+        end
+    end
+    text = text:gsub('%s+', ' ')
+    text = trim(text)
+    if text == '' then
+        return nil
+    end
+    return text
+end
+
+local function ensure_name_index()
+    if name_index then
+        return name_index
+    end
+
+    name_index = {}
+    local rm = AshitaCore and AshitaCore:GetResourceManager()
+    if not rm then
+        return name_index
+    end
+
+    -- Practical item id range for FFXI resources.
+    for item_id = 1, 65535 do
+        local ok, item = pcall(rm.GetItemById, rm, item_id)
+        if ok and item then
+            local fields = {}
+            if item.Name and item.Name[1] then
+                fields[#fields + 1] = item.Name[1]
+            end
+            if item.LogNameSingular and item.LogNameSingular[1] then
+                fields[#fields + 1] = item.LogNameSingular[1]
+            end
+            if item.LogNamePlural and item.LogNamePlural[1] then
+                fields[#fields + 1] = item.LogNamePlural[1]
+            end
+
+            for _, field in ipairs(fields) do
+                local name = coerce_name(field, item)
+                if name then
+                    local key = lower(name)
+                    if not name_index[key] then
+                        name_index[key] = item_id
+                    end
+                end
+            end
+        end
+    end
+
+    return name_index
+end
+
+local function resolve_names_to_ids(names)
+    local index = ensure_name_index()
+    local ids = {}
+    for _, name in ipairs(names or {}) do
+        local id = index[lower(name)]
+        if id then
+            ids[id] = true
+        end
+    end
+    return ids
+end
+
+local function load_profile_ids(path)
+    if not path then
+        return {}
+    end
+
+    local size = file_size(path)
+    if not size then
+        return {}
+    end
+
+    local cached = profile_cache[path]
+    if cached and cached.size == size and cached.ids then
+        return cached.ids
+    end
+
+    local data = read_file(path)
+    if not data then
+        return {}
+    end
+
+    local names
+    if path:lower():sub(-4) == '.lua' then
+        names = collect_lua_names(strip_lua_comments(data))
+    else
+        names = collect_xml_names(data)
+    end
+
+    local ids = resolve_names_to_ids(names)
+    profile_cache[path] = { size = size, ids = ids }
+    return ids
+end
+
+function M.get_match_ids(query)
+    local mode, arg = M.parse_query(query)
+    if not mode then
+        return {}
+    end
+
+    local player = get_player_context()
+    if not player then
+        return {}
+    end
+
+    local cache_key = table.concat({
+        mode,
+        arg or '',
+        player.name,
+        tostring(player.server_id),
+        player.job_abbr,
+    }, '\0')
+
+    local cached = query_cache[cache_key]
+    if cached then
+        -- Re-validate underlying file size cheaply.
+        local path = cached.path
+        if path and file_size(path) == cached.size then
+            return cached.ids
+        end
+    end
+
+    local path
+    if mode == 'lua' then
+        path = resolve_lua_path(player, arg)
+    else
+        path = resolve_xml_path(player, arg)
+    end
+
+    local ids = load_profile_ids(path)
+    query_cache[cache_key] = {
+        path = path,
+        size = path and file_size(path) or 0,
+        ids = ids,
+    }
+    return ids
+end
+
+function M.matches_item_id(item_id, query)
+    item_id = tonumber(item_id)
+    if not item_id or item_id <= 0 then
+        return false
+    end
+    local ids = M.get_match_ids(query)
+    return ids[item_id] == true
+end
+
 return M
+

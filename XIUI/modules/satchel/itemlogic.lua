@@ -1,11 +1,11 @@
 local breader = require('bitreader')
-local tooltipicons = require('modules.satchel.tooltipicons')
-local tooltipfonts = require('modules.satchel.tooltipfonts')
-local tooltiplayout = require('modules.satchel.tooltiplayout')
+local TextureManager = require('libs.texturemanager')
+local tooltips = require('modules.satchel.tooltips')
+local satchelfontcore = require('modules.satchel.satchelfontcore')
 local satchelcolors = require('modules.satchel.colors')
 local searchlogic = require('modules.satchel.searchlogic')
 local augmentlogic = require('modules.satchel.augmentlogic')
-local sortstate = require('modules.satchel.sortstate')
+local layoutstate = require('modules.satchel.layoutstate')
 local encoding = nil
 do
     local ok_encoding, encoding_lib = pcall(require, 'libs.encoding')
@@ -37,6 +37,7 @@ local function create_item_logic(ctx)
     local satchel = ctx.satchel
     local imgui = ctx.imgui
     local addon_path = ctx.addon_path or ''
+    local format_gil_text = ctx.format_gil_text
 
     local job_abbr = {
         [1] = 'WAR',
@@ -99,7 +100,7 @@ local function create_item_logic(ctx)
         Dark      = {0.70, 0.22, 0.90, 1.0},
     }
     local element_list_ordered = {'Lightning', 'Water', 'Light', 'Dark', 'Fire', 'Ice', 'Wind', 'Earth'}
-    tooltipicons.set_element_colors(element_colors)
+    tooltips.set_element_colors(element_colors)
 
     local armor_slot_masks = {
         head = 0x0010,
@@ -185,6 +186,8 @@ local function create_item_logic(ctx)
 
     local search_text_cache = {}
     local description_text_cache = {}
+    local slot_augment_cache = {}
+    local tooltip_sections_cache = {}
 
     function M.clear_caches()
         satchel.names = {}
@@ -192,28 +195,8 @@ local function create_item_logic(ctx)
         satchel.item_sort_keys = {}
         search_text_cache = {}
         description_text_cache = {}
-    end
-
-    function M.get_item_name(item_id)
-        if not item_id or item_id <= 0 then
-            return 'Empty'
-        end
-
-        local cached = satchel.names[item_id]
-        if cached then
-            return cached
-        end
-
-        local rm = AshitaCore:GetResourceManager()
-        local ok, item = pcall(rm.GetItemById, rm, item_id)
-
-        local name = ('Item #%d'):format(item_id)
-        if ok and item and item.Name and item.Name[1] and item.Name[1] ~= '' then
-            name = item.Name[1]
-        end
-
-        satchel.names[item_id] = name
-        return name
+        slot_augment_cache = {}
+        tooltip_sections_cache = {}
     end
 
     function M.get_item_type(item_id)
@@ -369,8 +352,8 @@ local function create_item_logic(ctx)
         end
 
         if source_container == target_container then
-            if not sortstate.is_auto_sort_enabled()
-                and not sortstate.should_visually_sort(source_container, satchel.container_sorted) then
+            if not layoutstate.is_auto_sort_enabled()
+                and not layoutstate.should_visually_sort(source_container, satchel.container_sorted) then
                 if not source.id or source.id <= 0 then
                     return false
                 end
@@ -630,8 +613,8 @@ local function create_item_logic(ctx)
         local reuse_text = format_duration(reuse_delay)
         local equip_text = format_duration(equip_delay)
 
-        -- ImGui 4.16 treats "<7" style prefixes as color markup; keep the literal brackets.
-        return ('\194\160<%s %s/[%s, %s]>'):format(uses_text or '--/--', current_timer_text, reuse_text, equip_text)
+        -- ImGui 4.16 treats "<7" style prefixes as color markup; draw-list footer avoids wrap/markup.
+        return ('<%s %s/[%s, %s]>'):format(uses_text or '--/--', current_timer_text, reuse_text, equip_text)
     end
 
     local function get_inventory_item(slot)
@@ -658,14 +641,24 @@ local function create_item_logic(ctx)
             return false
         end
 
+        -- Equipped state is only for the local player's live bags, never alt/slip views.
+        if slot.alt_view == true or slot.slip_view == true or slot.read_only == true then
+            return false
+        end
+
+        -- Field-accessible gear containers only (inventory + 8 wardrobes).
+        local target_container = tonumber(slot.container_id)
+        if target_container ~= 0 and not is_wardrobe_container(target_container) then
+            return false
+        end
+
         local inv = AshitaCore:GetMemoryManager():GetInventory()
         if not inv then
             return false
         end
 
-        local target_container = tonumber(slot.container_id)
         local target_property_index = tonumber(slot.property_index)
-        if target_container == nil or target_property_index == nil or target_property_index <= 0 then
+        if target_property_index == nil or target_property_index <= 0 then
             return false
         end
 
@@ -686,6 +679,10 @@ local function create_item_logic(ctx)
         return false
     end
 
+    function M.is_slot_currently_equipped(slot)
+        return is_slot_currently_equipped(slot)
+    end
+
     local function is_slot_in_bazaar(slot)
         if not slot or slot.container_id ~= 0 or not slot.id or slot.id <= 0 then
             return false
@@ -697,6 +694,10 @@ local function create_item_logic(ctx)
         end
 
         return (tonumber(inv_item.Price) or 0) > 0
+    end
+
+    function M.is_slot_in_bazaar(slot)
+        return is_slot_in_bazaar(slot)
     end
 
     local function get_enchantment_info(slot, item, resource)
@@ -786,16 +787,42 @@ local function create_item_logic(ctx)
         return signature
     end
 
+    local function slot_cache_key(slot)
+        if not slot then
+            return ''
+        end
+        return ('%s:%s:%s'):format(
+            tonumber(slot.container_id) or -1,
+            tonumber(slot.slot_index) or -1,
+            tonumber(slot.id) or 0
+        )
+    end
+
     local function slot_has_augments(slot)
-        local inv_item = get_inventory_item(slot)
-        if not inv_item or type(inv_item.Extra) ~= 'string' or inv_item.Extra == '' then
+        if not slot then
             return false
         end
 
-        return augmentlogic.has_augments(slot.id, inv_item.Extra)
+        local cache_key = slot_cache_key(slot)
+        if slot_augment_cache[cache_key] ~= nil then
+            return slot_augment_cache[cache_key]
+        end
+
+        local inv_item = get_inventory_item(slot)
+        local has_augments = false
+        if inv_item and type(inv_item.Extra) == 'string' and inv_item.Extra ~= '' then
+            has_augments = augmentlogic.has_augments(slot.id, inv_item.Extra)
+        end
+
+        slot_augment_cache[cache_key] = has_augments
+        return has_augments
     end
 
     local function get_slot_augment_lines(slot)
+        if not slot_has_augments(slot) then
+            return {}
+        end
+
         local inv_item = get_inventory_item(slot)
         if not inv_item or type(inv_item.Extra) ~= 'string' or inv_item.Extra == '' then
             return {}
@@ -804,53 +831,229 @@ local function create_item_logic(ctx)
         return augmentlogic.get_augment_lines(slot.id, inv_item.Extra)
     end
 
+    local function is_description_footer_line(line)
+        return type(line) == 'string' and line:match('^%s*%[%d+%]%s*$') ~= nil
+    end
+
     local function is_augment_description_line(line)
-        return type(line) == 'string' and line:match('^%[%d+%]') ~= nil
+        return type(line) == 'string' and line:match('^%[%d+%].+') ~= nil
     end
 
     local function split_description_augment_lines(desc)
         local body_lines = {}
         local augment_lines = {}
+        local footer_lines = {}
 
         if type(desc) ~= 'string' or desc == '' then
-            return '', augment_lines
+            return '', augment_lines, footer_lines
         end
 
         for line in (desc .. '\n'):gmatch('([^\n]*)\n') do
-            if is_augment_description_line(line) then
+            if is_description_footer_line(line) then
+                footer_lines[#footer_lines + 1] = trim_text(line)
+            elseif is_augment_description_line(line) then
                 augment_lines[#augment_lines + 1] = line
             elseif line ~= '' then
                 body_lines[#body_lines + 1] = line
             end
         end
 
-        return table.concat(body_lines, '\n'), augment_lines
+        return table.concat(body_lines, '\n'), augment_lines, footer_lines
     end
 
-    local function collect_augment_display_lines(slot, desc)
-        local _, desc_augment_lines = split_description_augment_lines(desc)
-        if #desc_augment_lines > 0 then
-            return desc_augment_lines
+    local UTF8_MALE = string.char(0xE2, 0x99, 0x82)
+    local UTF8_FEMALE = string.char(0xE2, 0x99, 0x80)
+    local SJIS_MALE = string.char(0x81, 0x89)
+    local SJIS_FEMALE = string.char(0x81, 0x8A)
+    local UTF8_REPLACEMENT = string.char(0xEF, 0xBF, 0xBD)
+    local RACE_ABBREVIATIONS = {
+        H = 'Hume',
+        E = 'Elvaan',
+        T = 'Tarutaru',
+    }
+
+    local function gender_word_from_marker(marker)
+        if marker == 'M' or marker == '♂' or marker == UTF8_MALE or marker == SJIS_MALE then
+            return 'Male'
+        end
+        if marker == 'F' or marker == '♀' or marker == UTF8_FEMALE or marker == SJIS_FEMALE then
+            return 'Female'
+        end
+        return nil
+    end
+
+    local function normalize_race_gender_text(text)
+        if type(text) ~= 'string' or text == '' then
+            return text
         end
 
-        local ext_lines = get_slot_augment_lines(slot)
-        if #ext_lines == 0 then
-            return {}
+        text = text:gsub(SJIS_MALE, ' Male')
+        text = text:gsub(SJIS_FEMALE, ' Female')
+
+        text = text:gsub('All Races%s+([MF])', function(marker)
+            return ('All Races %s'):format(gender_word_from_marker(marker) or marker)
+        end)
+
+        text = text:gsub('(Hume|Elvaan|Tarutaru)%s*([♂♀])', function(race, marker)
+            return ('%s %s'):format(race, gender_word_from_marker(marker) or marker)
+        end)
+        text = text:gsub('(Hume|Elvaan|Tarutaru)%s+([MF])(%s|$)', function(race, marker, tail)
+            return ('%s %s%s'):format(race, gender_word_from_marker(marker) or marker, tail)
+        end)
+
+        for abbr, race_name in pairs(RACE_ABBREVIATIONS) do
+            text = text:gsub('%f[%A]' .. abbr .. '([♂♀])', function(marker)
+                return ('%s %s'):format(race_name, gender_word_from_marker(marker) or marker)
+            end)
+            text = text:gsub('%f[%A]' .. abbr .. '([MF])%f[%A]', function(marker)
+                return ('%s %s'):format(race_name, gender_word_from_marker(marker) or marker)
+            end)
         end
 
-        local parts = {}
-        for _, augment in ipairs(ext_lines) do
-            if type(augment) == 'string' and augment ~= '' then
-                parts[#parts + 1] = augment
+        text = text:gsub(UTF8_MALE, 'Male')
+        text = text:gsub(UTF8_FEMALE, 'Female')
+        text = text:gsub('♂', 'Male')
+        text = text:gsub('♀', 'Female')
+
+        return text
+    end
+
+    local function infer_single_gender_from_races(item)
+        if not item then
+            return nil
+        end
+
+        local mask = read_number_field(item, 'Races')
+        if not mask then
+            return nil
+        end
+
+        local male_bits = bit.bor(0x0002, 0x0008, 0x0020)
+        local female_bits = bit.bor(0x0004, 0x0010, 0x0040)
+        local has_m = bit.band(mask, male_bits) ~= 0
+        local has_f = bit.band(mask, female_bits) ~= 0
+
+        if has_m and not has_f then
+            return 'Male'
+        end
+        if has_f and not has_m then
+            return 'Female'
+        end
+
+        return nil
+    end
+
+    local function fix_unrendered_gender_in_name(text, item)
+        if type(text) ~= 'string' or text == '' then
+            return text
+        end
+
+        if not text:find('?', 1, true) and not text:find(UTF8_REPLACEMENT, 1, true) then
+            return text
+        end
+
+        local gender = infer_single_gender_from_races(item)
+        if not gender then
+            return text
+        end
+
+        for _, race in ipairs({ 'Hume', 'Elvaan', 'Tarutaru' }) do
+            local start_index = 1
+            while true do
+                local race_start = text:find(race, start_index, true)
+                if not race_start then
+                    break
+                end
+
+                local cursor = race_start + #race
+                while cursor <= #text and text:sub(cursor, cursor):match('%s') do
+                    cursor = cursor + 1
+                end
+
+                local replaced = false
+                while cursor <= #text do
+                    local next_char = text:sub(cursor, cursor)
+                    if next_char == '?' then
+                        cursor = cursor + 1
+                        replaced = true
+                    elseif text:sub(cursor, cursor + #UTF8_REPLACEMENT - 1) == UTF8_REPLACEMENT then
+                        cursor = cursor + #UTF8_REPLACEMENT
+                        replaced = true
+                    else
+                        break
+                    end
+                end
+
+                if replaced then
+                    local prefix = text:sub(1, race_start - 1)
+                    local suffix = text:sub(cursor)
+                    if suffix ~= '' and not suffix:match('^%s') then
+                        suffix = ' ' .. suffix
+                    end
+                    return prefix .. race .. ' ' .. gender .. suffix
+                end
+
+                start_index = race_start + 1
             end
         end
 
-        if #parts == 0 then
-            return {}
+        return text
+    end
+
+    local function coerce_item_name_string(raw_name, item)
+        if type(raw_name) ~= 'string' or raw_name == '' then
+            return raw_name
         end
 
-        return { table.concat(parts, ' ') }
+        local ok, result = pcall(function()
+            local text = raw_name
+            text = text:gsub(SJIS_MALE, ' Male')
+            text = text:gsub(SJIS_FEMALE, ' Female')
+
+            if encoding and encoding.ShiftJIS_To_UTF8 then
+                local converted_ok, converted = pcall(encoding.ShiftJIS_To_UTF8, encoding, text, true)
+                if converted_ok and type(converted) == 'string' and converted ~= '' then
+                    text = converted
+                end
+            end
+
+            text = normalize_race_gender_text(text)
+            text = fix_unrendered_gender_in_name(text, item)
+            text = text:gsub('%s+', ' ')
+            return trim_text(text)
+        end)
+
+        if ok and type(result) == 'string' and result ~= '' then
+            return result
+        end
+
+        return raw_name
     end
+
+    function M.get_item_name(item_id)
+        if not item_id or item_id <= 0 then
+            return 'Empty'
+        end
+
+        local cached = satchel.names[item_id]
+        if cached then
+            return cached
+        end
+
+        local rm = AshitaCore:GetResourceManager()
+        local ok, item = pcall(rm.GetItemById, rm, item_id)
+
+        local raw_name = ('Item #%d'):format(item_id)
+        if ok and item and item.Name and item.Name[1] and item.Name[1] ~= '' then
+            raw_name = item.Name[1]
+        end
+
+        local name = coerce_item_name_string(raw_name, ok and item or nil) or raw_name
+        satchel.names[item_id] = name
+        return name
+    end
+
+    local collect_augment_display_lines
 
     local function get_effective_item_flags(item, slot)
         local flags_val = 0
@@ -1010,19 +1213,19 @@ local function create_item_logic(ctx)
             all = 0x01FE,
         }
 
-        local male_symbol = 'M'
-        local female_symbol = 'F'
+        local male_label = 'Male'
+        local female_label = 'Female'
 
         if bit.band(mask, race_masks.all) == race_masks.all then
             return 'All Races'
         end
 
         if bit.band(mask, race_masks.male) == race_masks.male and bit.band(mask, race_masks.female) == 0 then
-            return ('All Races %s'):format(male_symbol)
+            return ('All Races %s'):format(male_label)
         end
 
         if bit.band(mask, race_masks.female) == race_masks.female and bit.band(mask, race_masks.male) == 0 then
-            return ('All Races %s'):format(female_symbol)
+            return ('All Races %s'):format(female_label)
         end
 
         local names = {}
@@ -1033,9 +1236,9 @@ local function create_item_logic(ctx)
             if has_m and has_f then
                 table.insert(names, base_name)
             elseif has_m then
-                table.insert(names, ('%s %s'):format(base_name, male_symbol))
+                table.insert(names, ('%s %s'):format(base_name, male_label))
             elseif has_f then
-                table.insert(names, ('%s %s'):format(base_name, female_symbol))
+                table.insert(names, ('%s %s'):format(base_name, female_label))
             end
         end
 
@@ -1056,7 +1259,9 @@ local function create_item_logic(ctx)
         local flags_val = get_effective_item_flags(item, slot)
         local tags = {}
 
-        if bit.band(flags_val, 0x0010) ~= 0 then tags[#tags + 1] = 'alt' end
+        if bit.band(flags_val, 0x0010) ~= 0 and HzLimitedMode ~= true then
+            tags[#tags + 1] = 'alt'
+        end
         if bit.band(flags_val, 0x8000) ~= 0 then tags[#tags + 1] = 'rare' end
 
         if slot_has_augments(slot) then
@@ -1072,70 +1277,130 @@ local function create_item_logic(ctx)
         return tags
     end
 
-    local function render_tooltip_name_separator(color)
-        imgui.Dummy({ 0, 3 })
-        imgui.PushStyleColor(ImGuiCol_Separator, color)
-        imgui.Separator()
-        imgui.PopStyleColor(1)
-        imgui.Dummy({ 0, 3 })
+    -- Ashita main/4.16 TextColored treats strings as printf formats (% must be doubled).
+    -- Ashita 4.3 does not, so escaping would show a literal "%%".
+    local imgui_needs_printf_escape = (ImGuiChildFlags_Borders == nil)
+
+    local function escape_imgui_format(text)
+        if type(text) ~= 'string' or text == '' then
+            return text
+        end
+        if not imgui_needs_printf_escape then
+            return text
+        end
+        return (text:gsub('%%', '%%%%'))
     end
 
-    local function render_tooltip_tags_top_right(item, slot, start_x, start_y, wrap_width)
+    local function measure_tooltip_text_width(text)
+        local display_text = escape_imgui_format(text)
+        local metrics = tooltips.get_metrics()
+        local width = satchelfontcore.calc_text_width(display_text, metrics.family, metrics.pixel_size)
+        if not width or width <= 0 then
+            width = tonumber(select(1, imgui.CalcTextSize(display_text))) or 0
+        end
+        return display_text, width
+    end
+
+    local function render_tooltip_name_separator(color, sep_padding, line_width, start_x)
+        sep_padding = sep_padding or tooltips.BASE_SEP_PAD
+        line_width = tonumber(line_width) or 0
+        start_x = tonumber(start_x)
+
+        imgui.Dummy({ 0, sep_padding })
+
+        if start_x then
+            imgui.SetCursorPosX(start_x)
+        end
+
+        if line_width > 0 then
+            local screen_x, screen_y = imgui.GetCursorScreenPos()
+            local draw_list = imgui.GetWindowDrawList()
+            local col = imgui.GetColorU32(color)
+            draw_list:AddLine({ screen_x, screen_y }, { screen_x + line_width, screen_y }, col, 1.0)
+            imgui.Dummy({ line_width, 1 })
+        else
+            imgui.PushStyleColor(ImGuiCol_Separator, color)
+            imgui.Separator()
+            imgui.PopStyleColor(1)
+        end
+
+        imgui.Dummy({ 0, sep_padding })
+    end
+
+    local function render_tooltip_tags_top_right(item, slot, start_x, start_y, wrap_width, tag_size)
         local tags = get_item_flag_tags(item, slot)
         if #tags == 0 then
             return 0
         end
 
-        local as_words = tooltipicons.icons_as_words()
-        local tags_width = tooltipicons.measure_status_tags_width(satchel, addon_path, tags, as_words)
+        local as_words = tooltips.icons_as_words()
+        local tags_width = tooltips.measure_status_tags_width(satchel, addon_path, tags, as_words)
 
         imgui.SetCursorPos({ start_x + wrap_width - tags_width, start_y })
         for index, tag_key in ipairs(tags) do
             if index > 1 then
                 imgui.SameLine(0, 0)
             end
-            tooltipicons.render_status_tag(satchel, addon_path, tag_key, as_words)
+            tooltips.render_status_tag(satchel, addon_path, tag_key, as_words)
         end
 
         return math.max(
-            tonumber(imgui.GetTextLineHeight()) or tooltipicons.TAG_ICON_SIZE,
-            tooltipicons.TAG_ICON_SIZE
+            tonumber(imgui.GetTextLineHeight()) or tag_size,
+            tag_size
         )
     end
 
-    local function render_tooltip_header(item, slot, item_name, name_color, wrap_width, is_bazaar_listed)
+    local BAZAAR_BANNER_TEXT = 'Listed In Bazaar (Cannot Use/Equip)'
+    local EQUIPPED_BANNER_TEXT = 'Currently Equipped'
+
+    local function render_tooltip_header(item, slot, item_name, name_color, wrap_width, banner, layout_metrics)
         local start_x = imgui.GetCursorPosX()
         local start_y = imgui.GetCursorPosY()
+
+        if banner and banner.text and banner.color then
+            local display_text, text_w = measure_tooltip_text_width(banner.text)
+            imgui.SetCursorPosX(start_x + math.max(0, (wrap_width - text_w) * 0.5))
+            imgui.TextColored(banner.color, display_text)
+            local banner_gap = layout_metrics and layout_metrics.footer_gap or tooltips.BASE_FOOTER_GAP
+            if banner_gap > 0 then
+                imgui.Dummy({ 0, banner_gap })
+            end
+            start_y = imgui.GetCursorPosY()
+        end
+
         local tags = get_item_flag_tags(item, slot)
         local tags_width = 0
 
         if #tags > 0 then
-            tags_width = tooltipicons.measure_status_tags_width(
+            tags_width = tooltips.measure_status_tags_width(
                 satchel,
                 addon_path,
                 tags,
-                tooltipicons.icons_as_words()
+                tooltips.icons_as_words()
             )
         end
 
-        local tag_row_h = render_tooltip_tags_top_right(item, slot, start_x, start_y, wrap_width)
+        local tag_size = layout_metrics and layout_metrics.tag_size or tooltips.TAG_ICON_SIZE
+        local name_tag_gap = layout_metrics and layout_metrics.name_tag_gap or tooltips.BASE_NAME_TAG_GAP
+
+        local tag_row_h = render_tooltip_tags_top_right(item, slot, start_x, start_y, wrap_width, tag_size)
 
         imgui.SetCursorPos({ start_x, start_y })
         local name_wrap = start_x + wrap_width
         if tags_width > 0 then
-            name_wrap = start_x + wrap_width - tags_width - 8
+            name_wrap = start_x + wrap_width - tags_width - name_tag_gap
         end
         imgui.PushTextWrapPos(name_wrap)
-        imgui.TextColored(name_color, item_name)
+        imgui.TextColored(name_color, escape_imgui_format(item_name))
         imgui.PopTextWrapPos()
 
-        if is_bazaar_listed then
-            imgui.TextColored({ 0.95, 0.32, 0.32, 1.0 }, 'Listed in Bazaar (cannot use/equip)')
+        local header_bottom = imgui.GetCursorPosY()
+        local min_bottom = start_y + tag_row_h
+        if tags_width > 0 then
+            min_bottom = math.max(min_bottom, start_y + tag_size + 2)
         end
-
-        local content_bottom = imgui.GetCursorPosY()
-        if content_bottom < start_y + tag_row_h then
-            imgui.SetCursorPosY(start_y + tag_row_h)
+        if header_bottom < min_bottom then
+            imgui.SetCursorPosY(min_bottom)
         end
     end
 
@@ -1190,7 +1455,7 @@ local function create_item_logic(ctx)
         return by_slot[slot] or 'Armor'
     end
 
-    local WAVE_DASH_MARKER = tooltipfonts.get_wave_dash_marker()
+    local WAVE_DASH_MARKER = tooltips.get_wave_dash_marker()
 
     local function apply_description_punctuation(text)
         if type(text) ~= 'string' or text == '' then
@@ -1205,7 +1470,6 @@ local function create_item_logic(ctx)
             text = text:gsub(from, to)
         end
 
-        text = text:gsub('\239\191\189', '?')
         return text
     end
 
@@ -1255,7 +1519,7 @@ local function create_item_logic(ctx)
     end
 
     local function protect_ef_icon_bytes(text)
-        for index, entry in ipairs(tooltipicons.ELEMENTS) do
+        for index, entry in ipairs(tooltips.ELEMENTS) do
             local marker = string.char(0xEF, entry.byte)
             text = replace_literal(text, marker, ('{{ICON%d}}'):format(index))
         end
@@ -1266,7 +1530,7 @@ local function create_item_logic(ctx)
     end
 
     local function restore_ef_icon_bytes(text)
-        for index, entry in ipairs(tooltipicons.ELEMENTS) do
+        for index, entry in ipairs(tooltips.ELEMENTS) do
             text = replace_literal(text, ('{{ICON%d}}'):format(index), string.char(0xEF, entry.byte))
         end
         return text
@@ -1274,9 +1538,7 @@ local function create_item_logic(ctx)
 
     local function strip_description_controls(text)
         text = protect_ef_icon_bytes(text)
-        text = text:gsub('\30.', '')
-        text = text:gsub('\31.', '')
-        text = text:gsub('[%z\1-\8\11\12\14-\31]', ' ')
+        text = text:gsub('[%z\1-\8\11\12]', ' ')
         text = text:gsub('\194\160', ' ')
         text = restore_ef_icon_bytes(text)
         return text
@@ -1332,8 +1594,43 @@ local function create_item_logic(ctx)
         text = strip_description_controls(text)
         text = text:gsub('[ \t]+', ' ')
         text = text:gsub(' *\n *', '\n')
+        text = normalize_race_gender_text(text)
 
         return trim_text(text)
+    end
+
+    local function copy_description_string(value)
+        if type(value) ~= 'string' or value == '' then
+            return nil
+        end
+        return string.sub(value, 1, #value)
+    end
+
+    local function should_fix_element_placeholders(line)
+        if type(line) ~= 'string' or line == '' then
+            return false
+        end
+
+        if not line:find('[%?％]', 1, false) then
+            return false
+        end
+
+        local question_count = select(2, line:gsub('[%?％]', ''))
+        if question_count > 4 then
+            return false
+        end
+
+        return line:match('"Resist')
+            or line:match('^%[%d+%]')
+            or line:match('Bribery')
+            or line:match('[%?％]%s*[%+%-]?%d+')
+    end
+
+    local function maybe_fix_element_placeholders(line)
+        if should_fix_element_placeholders(line) then
+            return fix_known_element_placeholders(line)
+        end
+        return line
     end
 
     local function fix_known_element_placeholders(text)
@@ -1364,15 +1661,29 @@ local function create_item_logic(ctx)
     end
 
     local function title_case_words(text)
-        return tooltiplayout.title_case_words(text)
+        return tooltips.title_case_words(text)
+    end
+
+    local function format_tooltip_display_text(text)
+        if type(text) ~= 'string' or text == '' then
+            return text
+        end
+        return title_case_words(text)
+    end
+
+    local function trim_icon_stat_text(text)
+        if type(text) ~= 'string' then
+            return text
+        end
+        return text:gsub('^%s+', '')
     end
 
     local function format_augment_display_line(line)
-        return tooltiplayout.format_augment_display_line(line)
+        return tooltips.format_augment_display_line(line)
     end
 
     local function strip_elemental_resist_words(line)
-        return tooltiplayout.strip_elemental_resist_words(line)
+        return tooltips.strip_elemental_resist_words(line)
     end
 
     local function line_has_element_tokens(tokens)
@@ -1404,7 +1715,7 @@ local function create_item_logic(ctx)
             if byte == 0xEF and (index + 1) <= #line then
                 flush_text(index - 1)
                 local second = line:byte(index + 1)
-                local element_entry = tooltipicons.ELEMENT_BY_BYTE[second]
+                local element_entry = tooltips.ELEMENT_BY_BYTE[second]
                 if element_entry then
                     tokens[#tokens + 1] = { kind = 'elem', entry = element_entry }
                     index = index + 2
@@ -1425,55 +1736,20 @@ local function create_item_logic(ctx)
     local AUGMENT_TEXT_COLOR = { 0.98, 0.96, 0.72, 1.0 }
 
     local function render_inline_wave_dash(color)
-        tooltipfonts.ensure_tooltip_font_glyphs()
-
-        local wave_font = tooltipfonts.get_wave_font()
-        if wave_font then
-            imgui.PushFont(wave_font)
-            imgui.TextColored(color, tooltipfonts.get_wave_dash_char())
-            imgui.PopFont()
+        local metrics = tooltips.get_metrics()
+        if tooltips.font_has_glyph(metrics.family, metrics.pixel_size, tooltips.WAVE_DASH) then
+            imgui.TextColored(color, tooltips.WAVE_DASH)
             return
         end
-
-        if tooltipfonts.try_render_merged_glyph(color) then
-            return
-        end
-
-        local x, y = imgui.GetCursorScreenPos()
-        local h = tonumber(imgui.GetTextLineHeight()) or 14
-        local w = tooltipfonts.measure_wave_dash_width()
-        local draw = imgui.GetWindowDrawList()
-
-        if draw then
-            local col = imgui.GetColorU32(color or { 0.88, 0.88, 0.88, 1.0 })
-            local baseline = y + h * 0.68
-            local amp = h * 0.14
-            local segments = 14
-            local prev_x = x
-            local prev_y = baseline - amp * math.sin(0)
-
-            for i = 1, segments do
-                local t = i / segments
-                local px = x + w * t
-                local py
-                if t <= 0.5 then
-                    py = baseline - amp * math.sin(t * math.pi * 2)
-                else
-                    py = baseline + amp * math.sin((t - 0.5) * math.pi * 2)
-                end
-                draw:AddLine({ prev_x, prev_y }, { px, py }, col, 1.1)
-                prev_x = px
-                prev_y = py
-            end
-        end
-
-        imgui.Dummy({ w, h })
+        tooltips.render_symbol_inline(tooltips.WAVE_DASH, color, metrics.family, metrics.pixel_size)
     end
 
     local function render_text_with_wave_dash(color, text)
         if type(text) ~= 'string' or text == '' then
             return
         end
+
+        text = escape_imgui_format(text)
 
         if not text:find(WAVE_DASH_MARKER, 1, true) then
             imgui.TextColored(color, text)
@@ -1523,7 +1799,13 @@ local function create_item_logic(ctx)
             return
         end
 
-        imgui.TextColored(color, text)
+        local metrics = tooltips.get_metrics()
+        if tooltips.text_has_fallback_symbols(text, metrics.family, metrics.pixel_size) then
+            tooltips.render_text_with_symbols(color, text, metrics.family, metrics.pixel_size)
+            return
+        end
+
+        imgui.TextColored(color, escape_imgui_format(text))
     end
 
     local function render_description_line_tokens(tokens, as_words)
@@ -1535,9 +1817,9 @@ local function create_item_logic(ctx)
             end
 
             if token.kind == 'text' then
-                render_tooltip_text_colored(gray, token.value)
+                render_colored_description_text(trim_icon_stat_text(token.value), gray)
             elseif token.kind == 'elem' then
-                tooltipicons.render_element_token(satchel, addon_path, token.entry, as_words)
+                tooltips.render_element_token(satchel, addon_path, token.entry, as_words)
             end
         end
     end
@@ -1575,23 +1857,73 @@ local function create_item_logic(ctx)
         return tokens
     end
 
-    local function render_element_word_tokens(tokens, gray)
+    local function find_element_entry_by_name(name)
+        if type(name) ~= 'string' or name == '' then
+            return nil
+        end
+        for _, entry in ipairs(tooltips.ELEMENTS) do
+            if entry.name == name then
+                return entry
+            end
+        end
+        return nil
+    end
+
+    local function render_element_word_tokens(tokens, gray, as_words)
         gray = gray or { 0.88, 0.88, 0.88, 1.0 }
+        as_words = as_words == true
 
         for token_index, token in ipairs(tokens) do
             if token_index > 1 then
                 imgui.SameLine(0, 0)
             end
             if token.kind == 'elem_word' then
-                imgui.TextColored(element_colors[token.name], token.name)
+                if as_words then
+                    imgui.TextColored(element_colors[token.name], token.name)
+                else
+                    local entry = find_element_entry_by_name(token.name)
+                    if entry then
+                        -- Icon mode: FireIcon+8 with no gap after the icon.
+                        tooltips.render_element_token(satchel, addon_path, entry, false)
+                    else
+                        imgui.TextColored(element_colors[token.name] or gray, token.name)
+                    end
+                end
             else
-                render_tooltip_text_colored(gray, token.value)
+                local value = token.value
+                -- Keep icon/value flush: "Fire+8" -> icon then "+8", not "icon +8".
+                if not as_words and token_index > 1 and tokens[token_index - 1].kind == 'elem_word' then
+                    value = value:gsub('^%s+', '')
+                end
+                render_tooltip_text_colored(gray, format_tooltip_display_text(value))
             end
         end
     end
 
+    local function line_has_element_word_tokens(tokens)
+        for _, token in ipairs(tokens or {}) do
+            if token.kind == 'elem_word' then
+                return true
+            end
+        end
+        return false
+    end
+
+    local function render_colored_description_text(text, color)
+        if type(text) ~= 'string' or text == '' then
+            return
+        end
+
+        local tokens = build_element_word_tokens(text)
+        if line_has_element_word_tokens(tokens) then
+            render_element_word_tokens(tokens, color, tooltips.icons_as_words())
+        else
+            render_tooltip_text_colored(color, format_tooltip_display_text(text))
+        end
+    end
+
     local function render_description_line_with_element_words(line)
-        render_element_word_tokens(build_element_word_tokens(line))
+        render_element_word_tokens(build_element_word_tokens(line), nil, true)
     end
 
     local function render_inline_text_with_element_words(text)
@@ -1599,30 +1931,32 @@ local function create_item_logic(ctx)
             return
         end
 
-        render_element_word_tokens(build_element_word_tokens(text))
+        render_element_word_tokens(build_element_word_tokens(text), nil, true)
     end
 
-    local function render_description_line_tokens_hybrid(tokens)
+    local function render_description_line_tokens_hybrid(tokens, color)
+        color = color or { 0.88, 0.88, 0.88, 1.0 }
+
         for token_index, token in ipairs(tokens) do
             if token_index > 1 then
                 imgui.SameLine(0, 0)
             end
 
             if token.kind == 'text' then
-                render_inline_text_with_element_words(token.value)
+                render_colored_description_text(trim_icon_stat_text(token.value), color)
             elseif token.kind == 'elem' then
-                tooltipicons.render_element_token(satchel, addon_path, token.entry, false)
+                tooltips.render_element_token(satchel, addon_path, token.entry, false)
             end
         end
     end
 
     local function render_augment_description_line(line)
         line = format_augment_display_line(strip_elemental_resist_words(line))
-        local as_words = tooltipicons.icons_as_words()
-        local metrics = tooltipfonts.get_metrics()
+        local as_words = tooltips.icons_as_words()
+        local metrics = tooltips.get_metrics()
 
-        if as_words and tooltiplayout.line_needs_option_c(line, true) then
-            tooltiplayout.render_augment_option_c_line(
+        if as_words and tooltips.line_needs_option_c(line, true) then
+            tooltips.render_augment_option_c_line(
                 line,
                 AUGMENT_TEXT_COLOR,
                 element_colors,
@@ -1639,33 +1973,21 @@ local function create_item_logic(ctx)
         if line_has_element_tokens(tokens) then
             adjust_element_token_spacing(tokens, as_words)
             if as_words then
-                for token_index, token in ipairs(tokens) do
-                    if token_index > 1 then
-                        imgui.SameLine(0, 0)
-                    end
-
-                    if token.kind == 'text' then
-                        render_tooltip_text_colored(AUGMENT_TEXT_COLOR, token.value)
-                    elseif token.kind == 'elem' then
-                        tooltipicons.render_element_token(satchel, addon_path, token.entry, as_words)
-                    end
-                end
+                render_description_line_tokens(tokens, true)
             else
-                for token_index, token in ipairs(tokens) do
-                    if token_index > 1 then
-                        imgui.SameLine(0, 0)
-                    end
-
-                    if token.kind == 'text' then
-                        render_tooltip_text_colored(AUGMENT_TEXT_COLOR, token.value)
-                    elseif token.kind == 'elem' then
-                        tooltipicons.render_element_token(satchel, addon_path, token.entry, false)
-                    end
-                end
+                render_description_line_tokens_hybrid(tokens, AUGMENT_TEXT_COLOR)
             end
-        else
-            render_tooltip_text_colored(AUGMENT_TEXT_COLOR, fix_known_element_placeholders(line))
+            return
         end
+
+        -- Plain-text element names from augment data (e.g. "Fire+8 Earth+3").
+        local word_tokens = build_element_word_tokens(line)
+        if line_has_element_word_tokens(word_tokens) then
+            render_element_word_tokens(word_tokens, AUGMENT_TEXT_COLOR, as_words)
+            return
+        end
+
+        render_tooltip_text_colored(AUGMENT_TEXT_COLOR, format_tooltip_display_text(maybe_fix_element_placeholders(line)))
     end
 
     local function render_augment_display_lines(lines)
@@ -1693,6 +2015,29 @@ local function create_item_logic(ctx)
         return value
     end
 
+    function M.get_item_tooltip_name(item_id)
+        if not item_id or item_id <= 0 then
+            return 'Empty'
+        end
+
+        local item = M.get_item_resource(item_id)
+        if item then
+            for _, field_name in ipairs({ 'LogNameSingular', 'LogNamePlural', 'Name' }) do
+                local ok, field = pcall(function()
+                    return item[field_name]
+                end)
+                if ok and field then
+                    local name = read_resource_string_field(field, 1)
+                    if name then
+                        return tooltips.format_item_name(coerce_item_name_string(name, item))
+                    end
+                end
+            end
+        end
+
+        return tooltips.format_item_name(M.get_item_name(item_id))
+    end
+
     local function coerce_resource_string(value)
         if type(value) ~= 'string' or value == '' then
             return nil
@@ -1706,6 +2051,26 @@ local function create_item_logic(ctx)
         end
 
         return value
+    end
+
+    local function preprocess_description_raw(raw)
+        if type(raw) ~= 'string' or raw == '' then
+            return nil
+        end
+
+        -- Shield element icon bytes from Shift-JIS conversion (EF pairs are valid SJIS lead bytes).
+        local text = protect_ef_icon_bytes(raw)
+        text = protect_bare_fire_icon_byte(text)
+        text = replace_literal(text, '\129\96', WAVE_DASH_MARKER)
+
+        if encoding and encoding.ShiftJIS_To_UTF8 then
+            local ok, converted = pcall(encoding.ShiftJIS_To_UTF8, encoding, text, true)
+            if ok and type(converted) == 'string' and converted ~= '' then
+                text = converted
+            end
+        end
+
+        return text
     end
 
     local function looks_like_memory_dump(text)
@@ -1737,6 +2102,43 @@ local function create_item_logic(ctx)
         return false
     end
 
+    local function count_bad_control_bytes(line)
+        local bad = 0
+        local index = 1
+
+        while index <= #line do
+            local byte = line:byte(index)
+            if byte == 0xEF and (index + 1) <= #line then
+                local second = line:byte(index + 1)
+                if tooltips.ELEMENT_BY_BYTE[second] then
+                    index = index + 2
+                else
+                    if byte < 32 and byte ~= 9 then
+                        bad = bad + 1
+                    end
+                    index = index + 1
+                end
+            elseif byte == 0x1F and (index + 1) <= #line then
+                local next_byte = line:byte(index + 1)
+                if next_byte == 0x2B or next_byte == 0x2D then
+                    index = index + 2
+                elseif byte < 32 and byte ~= 9 then
+                    bad = bad + 1
+                    index = index + 1
+                else
+                    index = index + 1
+                end
+            elseif byte < 32 and byte ~= 9 and byte ~= 10 and byte ~= 13 then
+                bad = bad + 1
+                index = index + 1
+            else
+                index = index + 1
+            end
+        end
+
+        return bad
+    end
+
     local function is_plausible_raw_description(text)
         if type(text) ~= 'string' then
             return false
@@ -1764,15 +2166,7 @@ local function create_item_logic(ctx)
             return false
         end
 
-        local bad = 0
-        for i = 1, len do
-            local b = text:byte(i)
-            if b < 32 and b ~= 10 and b ~= 13 and b ~= 9 then
-                bad = bad + 1
-            end
-        end
-
-        return bad <= 2
+        return count_bad_control_bytes(text) <= 2
     end
 
     local function looks_like_game_description(text)
@@ -1786,14 +2180,22 @@ local function create_item_logic(ctx)
             or text:match('MP[%+%-]%d')
             or text:match('STR[%+%-]%d')
             or text:match('INT[%+%-]%d')
+            or text:match('DEX[%+%-]%d')
+            or text:match('VIT[%+%-]%d')
+            or text:match('Haste[%+%-]')
             or text:match('"%s*[%w%s]+"')
             or text:match('Enchantment')
+            or text:match('Furnishing')
+            or text:match('Occasionally')
             or text:match('Latent effect')
             or text:match('Latent Effect')
             or text:match('Augment')
             or text:match('Regen')
             or text:match('Refresh')
             or text:match('Reraise')
+            or text:match('Duration:')
+            or text:match('A cluster of')
+            or text:match('A delectable')
     end
 
     local function finalize_description_text(raw)
@@ -1810,6 +2212,14 @@ local function create_item_logic(ctx)
             return cleaned
         end
 
+        -- Short static dat blurbs (furnishing, food lore) may not match stat heuristics.
+        if #cleaned >= 4 and count_bad_control_bytes(cleaned) <= 2 then
+            local question_count = select(2, cleaned:gsub('%?', ''))
+            if question_count < (#cleaned / 3) then
+                return cleaned
+            end
+        end
+
         return nil
     end
 
@@ -1818,132 +2228,293 @@ local function create_item_logic(ctx)
             return nil
         end
 
-        local cleaned = finalize_description_text(raw)
-        if cleaned then
-            return cleaned
-        end
-
-        local coerced = coerce_resource_string(raw)
-        return coerced and finalize_description_text(coerced) or nil
+        return finalize_description_text(preprocess_description_raw(raw))
     end
 
-    local function append_description_candidate(candidates, seen, raw)
-        if type(raw) ~= 'string' or raw == '' then
-            return
+    local function get_static_item_description_raw(item_id)
+        if not item_id or item_id <= 0 then
+            return nil
         end
 
-        if seen[raw] then
-            return
+        local item = M.get_item_resource(item_id)
+        if not item or not item.Description then
+            return nil
         end
 
-        seen[raw] = true
-        candidates[#candidates + 1] = raw
+        return copy_description_string(read_resource_string_field(item.Description, 1))
     end
 
-    local function collect_description_candidates(item, item_id, resources)
-        local candidates = {}
-        local seen = {}
+    local function normalize_compare_line(line)
+        if type(line) ~= 'string' then
+            return ''
+        end
+        return trim_text(line):lower():gsub('%s+', ' ')
+    end
 
-        if item and item.Description then
-            for _, index in ipairs({ 1, 0, 2 }) do
-                append_description_candidate(candidates, seen, read_resource_string_field(item.Description, index))
+    local function looks_like_garbage_tooltip_line(line)
+        if type(line) ~= 'string' or line == '' then
+            return false
+        end
+
+        if looks_like_memory_dump(line) then
+            return true
+        end
+
+        if line:match('^%[%d+%][%x%s%?%.]+$') and not line:match('[%a]+%+') then
+            return true
+        end
+
+        local question_count = select(2, line:gsub('%?', ''))
+        if question_count >= 4 and question_count >= (#line / 4) then
+            return true
+        end
+
+        if count_bad_control_bytes(line) >= 2 then
+            return true
+        end
+
+        return false
+    end
+
+    local function line_has_element_icon_bytes(line)
+        if type(line) ~= 'string' or line == '' then
+            return false
+        end
+
+        if line:find(string.char(0xEF), 1, true) then
+            return true
+        end
+
+        return line:find(string.char(0x1F) .. '[%+%-]', 1) ~= nil
+    end
+
+    local function line_should_render_plain(line)
+        if type(line) ~= 'string' or line == '' then
+            return true
+        end
+
+        if line_has_element_icon_bytes(line) then
+            return false
+        end
+
+        if looks_like_garbage_tooltip_line(line) then
+            return true
+        end
+
+        local question_count = select(2, line:gsub('%?', ''))
+        if question_count >= 3 and question_count >= (#line / 6) then
+            return true
+        end
+
+        return false
+    end
+
+    local CONSUMABLE_STAT_LINE_PATTERNS = {
+        '^Duration:%s*',
+        '^HP[%+%-]',
+        '^MP[%+%-]',
+        '^STR[%+%-]',
+        '^DEX[%+%-]',
+        '^VIT[%+%-]',
+        '^AGI[%+%-]',
+        '^INT[%+%-]',
+        '^MND[%+%-]',
+        '^CHR[%+%-]',
+        '^Accuracy[%+%-]',
+        '^Ranged Accuracy[%+%-]',
+        '^Magic Accuracy[%+%-]',
+        '^Attack[%+%-]',
+        '^Defense[%+%-]',
+        '^Evasion[%+%-]',
+        '^%".-"%s*[%+%-]',
+        '^"Resist ',
+        '^Increases ',
+    }
+
+    local function line_looks_like_consumable_stat(line)
+        if type(line) ~= 'string' or line == '' then
+            return false
+        end
+
+        for _, pattern in ipairs(CONSUMABLE_STAT_LINE_PATTERNS) do
+            if line:match(pattern) then
+                return true
             end
         end
 
-        if resources and item_id then
-            local lookup_ids = { item_id }
-            if item then
-                local resource_id = tonumber(item.ResourceId)
-                if resource_id and resource_id > 0 and resource_id ~= item_id then
-                    lookup_ids[#lookup_ids + 1] = resource_id
+        local stat_tokens = select(2, line:gsub('[%a][%a%s]*[%+%-]%d+', ''))
+        return stat_tokens >= 2
+    end
+
+    local function split_consumable_lore_and_stats(desc)
+        if type(desc) ~= 'string' or desc == '' then
+            return '', ''
+        end
+
+        local lore_lines = {}
+        local stat_lines = {}
+        local in_stats = false
+
+        for line in (desc .. '\n'):gmatch('([^\n]*)\n') do
+            if line == '' then
+                if in_stats then
+                    stat_lines[#stat_lines + 1] = ''
+                elseif #lore_lines > 0 then
+                    lore_lines[#lore_lines + 1] = ''
                 end
-            end
-
-            for _, string_key in ipairs({ 'items.descriptions', 'item.descriptions' }) do
-                for _, lookup_id in ipairs(lookup_ids) do
-                    local attempts = {
-                        function() return resources:GetString(string_key, lookup_id) end,
-                        function() return resources:GetString(string_key, lookup_id, 2) end,
-                        function() return resources:GetString(string_key, lookup_id, 1) end,
-                        function() return resources:GetString(string_key, lookup_id, 0) end,
-                    }
-
-                    for _, attempt in ipairs(attempts) do
-                        local ok, value = pcall(attempt)
-                        append_description_candidate(candidates, seen, ok and value or nil)
-                    end
-                end
+            elseif not in_stats and line_looks_like_consumable_stat(line) then
+                in_stats = true
+                stat_lines[#stat_lines + 1] = line
+            elseif in_stats then
+                stat_lines[#stat_lines + 1] = line
+            else
+                lore_lines[#lore_lines + 1] = line
             end
         end
 
-        return candidates
+        while #lore_lines > 0 and lore_lines[#lore_lines] == '' do
+            table.remove(lore_lines)
+        end
+        while #stat_lines > 0 and stat_lines[1] == '' do
+            table.remove(stat_lines, 1)
+        end
+
+        return table.concat(lore_lines, '\n'), table.concat(stat_lines, '\n')
     end
 
-    local function get_item_description_text(item, item_id)
+    local function line_is_instance_signature(line, slot, item_type)
+        if item_type ~= 4 and item_type ~= 5 then
+            return false
+        end
+
+        local signature = get_item_signature_text(slot, item_type)
+        if signature == '' then
+            return false
+        end
+
+        local bracketed = ('[%s]'):format(signature)
+        return normalize_compare_line(line) == normalize_compare_line(bracketed)
+    end
+
+    local function filter_description_body_lines(body_desc, slot, item_type, strip_augment_lines)
+        local filtered = {}
+
+        for line in (body_desc .. '\n'):gmatch('([^\n]*)\n') do
+            if line == '' then
+                if #filtered > 0 and filtered[#filtered] ~= '' then
+                    filtered[#filtered + 1] = ''
+                end
+            elseif looks_like_garbage_tooltip_line(line) then
+                -- drop corrupted rows
+            elseif strip_augment_lines and is_augment_description_line(line) then
+                -- augments render from dat template or validated instance Extra
+            elseif strip_augment_lines and is_description_footer_line(line) then
+                -- static dat footers render in the tooltip footer
+            elseif line_is_instance_signature(line, slot, item_type) then
+                -- signatures render in the footer
+            else
+                filtered[#filtered + 1] = line
+            end
+        end
+
+        while #filtered > 0 and filtered[#filtered] == '' do
+            table.remove(filtered)
+        end
+
+        return table.concat(filtered, '\n')
+    end
+
+    local DESCRIPTION_CACHE_VERSION = 9
+
+    local function get_item_description_text(_item, item_id)
         if not item_id or item_id <= 0 then
             return ''
         end
 
-        local cache_key = tostring(item_id)
+        local cache_key = DESCRIPTION_CACHE_VERSION .. ':' .. tostring(item_id)
         if description_text_cache[cache_key] ~= nil then
             return description_text_cache[cache_key]
         end
 
-        if not item then
-            item = M.get_item_resource(item_id)
-        end
-
-        local resolved = ''
-        local resources = AshitaCore:GetResourceManager()
-        for _, raw in ipairs(collect_description_candidates(item, item_id, resources)) do
-            local cleaned = try_resolve_description(raw)
-            if cleaned then
-                resolved = cleaned
-                break
-            end
-        end
-
+        local raw = get_static_item_description_raw(item_id)
+        local resolved = raw and (try_resolve_description(raw) or '') or ''
         description_text_cache[cache_key] = resolved
         return resolved
     end
 
-    local function measure_text_width(text)
-        if type(text) ~= 'string' or text == '' then
-            return 0
+    local function build_tooltip_description(slot, item, item_id)
+        local cache_key = DESCRIPTION_CACHE_VERSION .. ':' .. (slot and slot_cache_key(slot) or ('id:%s'):format(item_id or 0))
+        local cached = tooltip_sections_cache[cache_key]
+        if cached then
+            return cached
         end
 
-        if text:find(WAVE_DASH_MARKER, 1, true) then
-            local marker_width = tooltipfonts.measure_wave_dash_width()
-            local _, marker_count = text:gsub(WAVE_DASH_MARKER, '')
-            local placeholder = text:gsub(WAVE_DASH_MARKER, '~')
-            local base_width = tooltipfonts.calc_text_width(placeholder)
-            if marker_count > 0 then
-                local tilde_width = tooltipfonts.calc_text_width('~')
-                if tilde_width > 0 then
-                    return base_width + (marker_width - tilde_width) * marker_count
+        local base_desc = get_item_description_text(nil, item_id)
+        local item_type = M.get_item_type(item_id)
+
+        local augment_lines = {}
+        local footer_lines = {}
+        if slot and slot_has_augments(slot) then
+            local instance_augment_texts = get_slot_augment_lines(slot)
+            local parts = {}
+            for _, text in ipairs(instance_augment_texts) do
+                if type(text) == 'string' and text ~= '' and not looks_like_garbage_tooltip_line(text) then
+                    parts[#parts + 1] = text
                 end
             end
-            return base_width
+            if #parts > 0 then
+                augment_lines = { table.concat(parts, ' ') }
+            end
+            local _, _, dat_footer_lines = split_description_augment_lines(base_desc)
+            for _, line in ipairs(dat_footer_lines) do
+                if not looks_like_garbage_tooltip_line(line) then
+                    footer_lines[#footer_lines + 1] = line
+                end
+            end
+        else
+            local _, dat_augment_lines, dat_footer_lines = split_description_augment_lines(base_desc)
+            for _, line in ipairs(dat_augment_lines) do
+                if not looks_like_garbage_tooltip_line(line) then
+                    augment_lines[#augment_lines + 1] = line
+                end
+            end
+            for _, line in ipairs(dat_footer_lines) do
+                if not looks_like_garbage_tooltip_line(line) then
+                    footer_lines[#footer_lines + 1] = line
+                end
+            end
         end
 
-        return tooltipfonts.calc_text_width(text)
+        local raw_body = select(1, split_description_augment_lines(base_desc))
+        local body_desc = filter_description_body_lines(raw_body, slot, item_type, true)
+
+        local lore_desc = ''
+        local stats_desc = ''
+        if item_type == 7 then
+            local consumable_body = filter_description_body_lines(base_desc, slot, item_type, false)
+            lore_desc, stats_desc = split_consumable_lore_and_stats(consumable_body)
+        end
+
+        local sections = {
+            base_desc = base_desc,
+            body_desc = body_desc,
+            augment_lines = augment_lines,
+            footer_lines = footer_lines,
+            lore_desc = lore_desc,
+            stats_desc = stats_desc,
+        }
+
+        tooltip_sections_cache[cache_key] = sections
+        return sections
+    end
+
+    collect_augment_display_lines = function(slot, _desc)
+        local sections = build_tooltip_description(slot, M.get_item_resource(slot and slot.id), slot and slot.id)
+        return sections.augment_lines
     end
 
     local function get_tooltip_layout_metrics()
-        return tooltipfonts.get_metrics()
-    end
-
-    local function get_tooltip_wrap_width(lines, extra_width)
-        local metrics = get_tooltip_layout_metrics()
-        local target = tonumber(extra_width) or 0
-
-        for _, line in ipairs(lines or {}) do
-            if type(line) == 'string' and line ~= '' then
-                target = math.max(target, measure_text_width(line))
-            end
-        end
-
-        return math.min(metrics.max_width, target + metrics.width_pad)
+        return tooltips.get_metrics()
     end
 
     local JOBS_FIRST_LINE_COUNT = 6
@@ -2020,19 +2591,17 @@ local function create_item_logic(ctx)
         return lines
     end
 
-    local function append_jobs_measure_lines(lines, level, jobs)
-        for _, line in ipairs(format_jobs_display_lines(level, jobs)) do
-            lines[#lines + 1] = line
-        end
-    end
-
     local function render_jobs_display(level, jobs, color)
         for _, line in ipairs(format_jobs_display_lines(level, jobs)) do
-            imgui.TextColored(color, line)
+            imgui.TextColored(color, escape_imgui_format(line))
         end
     end
 
     local function get_elemental_footer_entries(slot)
+        if not slot_has_augments(slot) then
+            return {}
+        end
+
         local inv_item = get_inventory_item(slot)
         if not inv_item or type(inv_item.Extra) ~= 'string' or inv_item.Extra == '' then
             return {}
@@ -2041,8 +2610,47 @@ local function create_item_logic(ctx)
         return augmentlogic.get_elemental_footer_entries(slot and slot.id, inv_item.Extra)
     end
 
-    local function append_footer_measure_lines(lines, slot, item, item_type, enchant_info)
-        local extra_width = 0
+    local FOOTER_TEXT_COLOR = { 0.92, 0.92, 0.92, 1.0 }
+    local ENCHANT_DEPLETED_COLOR = { 0.95, 0.32, 0.32, 1.0 }
+
+    local function enchant_status_should_be_red(status_text)
+        if type(status_text) ~= 'string' then
+            return false
+        end
+
+        local uses = status_text:match('<%s*(%d+)')
+        return uses ~= nil and tonumber(uses) == 0
+    end
+
+    local function normalize_footer_display_text(text)
+        if type(text) ~= 'string' then
+            return ''
+        end
+        return text:gsub('^\194\160', '')
+    end
+
+    local function measure_footer_text_width(text)
+        local display_text = escape_imgui_format(normalize_footer_display_text(text))
+        local metrics = tooltips.get_metrics()
+        local width = satchelfontcore.calc_text_width(display_text, metrics.family, metrics.pixel_size)
+        if not width or width <= 0 then
+            width = tonumber(imgui.CalcTextSize(display_text)) or 0
+        end
+        return display_text, width
+    end
+
+    local function get_description_footer_lines(slot, item_id)
+        local sections = build_tooltip_description(slot, M.get_item_resource(item_id), item_id)
+        return sections.footer_lines or {}
+    end
+
+    local function collect_footer_text_lines(slot, item, item_type, enchant_info)
+        local lines = {}
+
+        for _, line in ipairs(get_description_footer_lines(slot, slot and slot.id)) do
+            lines[#lines + 1] = line
+        end
+
         local signature = get_item_signature_text(slot, item_type)
         if signature ~= '' then
             lines[#lines + 1] = ('[%s]'):format(signature)
@@ -2058,20 +2666,20 @@ local function create_item_logic(ctx)
             lines[#lines + 1] = ('<Item Level:%d>'):format(item_level)
         end
 
-        local elemental_entries = get_elemental_footer_entries(slot)
-        if #elemental_entries > 0 then
-            extra_width = tooltipicons.measure_elemental_footer_width(
-                satchel,
-                addon_path,
-                elemental_entries,
-                tooltipicons.icons_as_words()
-            )
-        end
-
-        return extra_width
+        return lines
     end
 
-    local FOOTER_TEXT_COLOR = { 0.92, 0.92, 0.92, 1.0 }
+    local function ensure_tooltip_footer_width(slot, item, item_type, enchant_info, content_width)
+        local max_w = 0
+        for _, text in ipairs(collect_footer_text_lines(slot, item, item_type, enchant_info)) do
+            local _, width = measure_footer_text_width(text)
+            max_w = math.max(max_w, width)
+        end
+
+        if max_w > content_width then
+            imgui.Dummy({ max_w - content_width, 0 })
+        end
+    end
 
     local function render_tooltip_footer_right(text, color)
         if type(text) ~= 'string' or text == '' then
@@ -2079,14 +2687,39 @@ local function create_item_logic(ctx)
         end
 
         color = color or FOOTER_TEXT_COLOR
-        local text_w = imgui.CalcTextSize(text)
-        text_w = tonumber(text_w) or 0
-        local right_x = math.max(0, (tonumber(imgui.GetWindowWidth()) or 0) - text_w - 10)
-        imgui.SetCursorPosX(right_x)
-        imgui.TextColored(color, text)
+        local display_text, text_w = measure_footer_text_width(text)
+        local padding = get_tooltip_layout_metrics().padding or 10
+        local window_w = tonumber(imgui.GetWindowWidth()) or 0
+        local right_x = math.max(padding, window_w - text_w - padding)
+        local line_h = tonumber(imgui.GetTextLineHeight()) or 0
+        local window_x = select(1, imgui.GetWindowPos())
+        local screen_y = select(2, imgui.GetCursorScreenPos())
+        local draw_list = imgui.GetWindowDrawList()
+
+        if draw_list and window_x and screen_y then
+            draw_list:AddText(
+                { window_x + right_x, screen_y },
+                imgui.GetColorU32(color),
+                display_text
+            )
+        else
+            imgui.SetCursorPosX(right_x)
+            imgui.TextColored(color, display_text)
+        end
+
+        imgui.Dummy({ 0, line_h })
     end
 
-    local function render_tooltip_footer(slot, item, item_type, enchant_info)
+    local function render_tooltip_footer(slot, item, item_type, enchant_info, footer_gap)
+        footer_gap = footer_gap or tooltips.BASE_FOOTER_GAP
+        if footer_gap > 0 then
+            imgui.Dummy({ 0, footer_gap })
+        end
+
+        for _, line in ipairs(get_description_footer_lines(slot, slot and slot.id)) do
+            render_tooltip_footer_right(line)
+        end
+
         local signature = get_item_signature_text(slot, item_type)
         if signature ~= '' then
             render_tooltip_footer_right(('[%s]'):format(signature))
@@ -2094,7 +2727,8 @@ local function create_item_logic(ctx)
 
         local enchant_status = format_enchant_status(enchant_info)
         if enchant_status then
-            render_tooltip_footer_right(enchant_status)
+            local enchant_color = enchant_status_should_be_red(enchant_status) and ENCHANT_DEPLETED_COLOR or FOOTER_TEXT_COLOR
+            render_tooltip_footer_right(enchant_status, enchant_color)
         end
 
         local item_level = get_item_level_value(item)
@@ -2104,131 +2738,88 @@ local function create_item_logic(ctx)
 
         local elemental_entries = get_elemental_footer_entries(slot)
         if #elemental_entries > 0 then
-            tooltipicons.render_elemental_footer_right(satchel, addon_path, elemental_entries, FOOTER_TEXT_COLOR, tooltipicons.icons_as_words())
+            tooltips.render_elemental_footer_right(satchel, addon_path, elemental_entries, FOOTER_TEXT_COLOR, tooltips.icons_as_words())
         end
     end
 
-    local function append_description_measure_lines(lines, desc)
-        if desc == '' then
+    local BAZAAR_GIL_COLOR = { 0.98, 0.88, 0.48, 1.0 }
+
+    local function render_tooltip_bazaar_price(slot, content_left, content_width, footer_gap)
+        if not is_slot_in_bazaar(slot) or type(format_gil_text) ~= 'function' then
             return
         end
 
-        for line in (desc .. '\n'):gmatch('([^\n]*)\n') do
-            if line ~= '' then
-                lines[#lines + 1] = line
-            end
-        end
-    end
-
-    local function collect_tooltip_measure_lines(slot, item, item_name, item_type, enchant_info)
-        local lines = { item_name or '' }
-        local desc = get_item_description_text(item, slot and slot.id)
-
-        if item_type == 4 or item_type == 5 then
-            local level = item and read_number_field(item, 'Level') or nil
-            local jobs = get_equip_jobs_text(item)
-            local family = (item_type == 4) and get_weapon_type_text(item) or get_armor_type_text(item)
-            local races = get_item_races_text(item)
-            if races ~= '' then
-                lines[#lines + 1] = ('(%s) %s'):format(family, races)
-            else
-                lines[#lines + 1] = ('(%s)'):format(family)
-            end
-
-            local dmg = item and read_number_field(item, 'Damage') or nil
-            local def = item and read_number_field(item, 'Defense') or nil
-            local delay = item and read_number_field(item, 'Delay') or nil
-            local desc_has_combat_row = description_has_combat_stats(desc)
-            local body_desc, _ = split_description_augment_lines(desc)
-
-            if item_type == 4 then
-                local combat_parts = {}
-                if dmg then table.insert(combat_parts, ('DMG:%d'):format(dmg)) end
-                if dmg and is_plausible_delay(delay) then
-                    table.insert(combat_parts, ('Delay:%d'):format(delay))
-                end
-                if #combat_parts > 0 and not desc_has_combat_row then
-                    lines[#lines + 1] = table.concat(combat_parts, '  ')
-                end
-            else
-                if def then
-                    lines[#lines + 1] = ('DEF:%d'):format(def)
-                end
-                if def and is_plausible_delay(delay) then
-                    lines[#lines + 1] = ('Delay:%d'):format(delay)
-                end
-            end
-
-            if body_desc ~= '' then
-                local measure_desc = body_desc
-                if item_type == 4 and not desc_has_combat_row then
-                    measure_desc = filter_weapon_description_lines(body_desc)
-                end
-                append_description_measure_lines(lines, measure_desc)
-            end
-
-            for _, augment_line in ipairs(collect_augment_display_lines(slot, desc)) do
-                lines[#lines + 1] = augment_line
-            end
-
-            append_jobs_measure_lines(lines, level, jobs)
-        else
-            append_description_measure_lines(lines, desc)
+        local inv_item = get_inventory_item(slot)
+        local price = inv_item and tonumber(inv_item.Price) or 0
+        if price <= 0 then
+            return
         end
 
-        local footer_extra_width = append_footer_measure_lines(lines, slot, item, item_type, enchant_info)
+        if footer_gap > 0 then
+            imgui.Dummy({ 0, footer_gap })
+        end
 
-        return lines, footer_extra_width
+        local gil_text = format_gil_text(price)
+        local display_text = escape_imgui_format(gil_text)
+        local metrics = get_tooltip_layout_metrics()
+        local icon_size = metrics.tag_size or tooltips.TAG_ICON_SIZE
+        local icon_gap = 4
+        local tex = TextureManager.getFileTexture('gil')
+        local ptr = TextureManager.getTexturePtr(tex)
+        local text_w = tonumber(imgui.CalcTextSize(display_text)) or 0
+        local total_w = text_w + (ptr and (icon_size + icon_gap) or 0)
+        local start_x = content_left + math.max(0, (content_width - total_w) * 0.5)
+
+        imgui.SetCursorPosX(start_x)
+        if ptr then
+            imgui.Image(ptr, { icon_size, icon_size })
+            imgui.SameLine(0, icon_gap)
+        end
+        imgui.TextColored(BAZAAR_GIL_COLOR, display_text)
     end
 
     local function render_wrapped_gray_text(text, gray)
         gray = gray or { 0.88, 0.88, 0.88, 1.0 }
-        render_tooltip_text_colored(gray, text)
+        render_colored_description_text(text, gray)
     end
 
     local function render_desc_with_elements(text)
-        local as_words = tooltipicons.icons_as_words()
-        local metrics = tooltipfonts.get_metrics()
+        local as_words = tooltips.icons_as_words()
+        local metrics = tooltips.get_metrics()
         local gray = { 0.88, 0.88, 0.88, 1.0 }
 
         for line in (text .. '\n'):gmatch('([^\n]*)\n') do
             if line == '' then
                 imgui.Spacing()
+            elseif line_should_render_plain(line) then
+                if not looks_like_garbage_tooltip_line(line) then
+                    render_wrapped_gray_text(line)
+                end
             else
                 local tokens = parse_description_line(line)
-                local line_as_words = as_words or line:find('"', 1, true) ~= nil
-                if line_as_words and tooltiplayout.line_needs_option_c(fix_known_element_placeholders(line), true) then
-                    tooltiplayout.render_option_c_line(
-                        fix_known_element_placeholders(line),
+                if as_words and tooltips.line_needs_option_c(maybe_fix_element_placeholders(line), true) then
+                    tooltips.render_option_c_line(
+                        maybe_fix_element_placeholders(line),
                         gray,
                         element_colors,
                         metrics.wrap_width,
                         metrics.family,
                         metrics.pixel_size,
-                        render_tooltip_text_colored
+                        function(color, chunk)
+                            render_tooltip_text_colored(color, format_tooltip_display_text(chunk))
+                        end
                     )
                 elseif line_has_element_tokens(tokens) then
-                    adjust_element_token_spacing(tokens, line_as_words)
-                    if line_as_words then
-                        render_description_line_tokens(tokens, line_as_words)
+                    adjust_element_token_spacing(tokens, as_words)
+                    if as_words then
+                        render_description_line_tokens(tokens, true)
                     else
                         render_description_line_tokens_hybrid(tokens)
                     end
-                elseif line_as_words then
-                    render_description_line_with_element_words(fix_known_element_placeholders(line))
+                elseif as_words then
+                    render_description_line_with_element_words(maybe_fix_element_placeholders(line))
                 else
-                    local has_elem_word = false
-                    for _, elem in ipairs(element_list_ordered) do
-                        if line:find(elem, 1, true) then
-                            has_elem_word = true
-                            break
-                        end
-                    end
-                    if has_elem_word then
-                        render_description_line_with_element_words(line)
-                    else
-                        render_wrapped_gray_text(line)
-                    end
+                    render_wrapped_gray_text(line)
                 end
             end
         end
@@ -2239,46 +2830,61 @@ local function create_item_logic(ctx)
             return
         end
 
-        local catalog_only = slot.virtual == true
-        tooltipicons.set_catalog_mode(catalog_only)
-
         local ok, err = pcall(function()
         local item = M.get_item_resource(slot.id)
-        local item_name = M.get_item_name(slot.id)
+        local item_name = M.get_item_tooltip_name(slot.id)
         local item_type = M.get_item_type(slot.id)
         local enchant_info = get_enchantment_info(slot, item, item)
-        local is_bazaar_listed = is_slot_in_bazaar(slot)
+        local header_banner = M.get_item_status_banner(slot)
         local layout_metrics = get_tooltip_layout_metrics()
+        local wrap_width = layout_metrics.wrap_width
+        local content_width = wrap_width
+        if header_banner then
+            local _, banner_w = measure_tooltip_text_width(header_banner.text)
+            content_width = math.max(wrap_width, banner_w)
+        end
 
+        imgui.PushStyleVar(ImGuiStyleVar_WindowPadding, { layout_metrics.padding, layout_metrics.padding })
+        -- Tooltip chrome border matches the hovered slot's border color.
+        local tooltip_border = M.get_slot_border_color(slot)
+        local border_colors_pushed = 1
+        imgui.PushStyleColor(ImGuiCol_Border, tooltip_border)
+        if ImGuiCol_BorderShadow ~= nil then
+            imgui.PushStyleColor(ImGuiCol_BorderShadow, tooltip_border)
+            border_colors_pushed = 2
+        end
         imgui.BeginTooltip()
-        local font_pushed = tooltipfonts.push_tooltip_font()
+        local font_pushed = tooltips.push_tooltip_font()
         local ok_render, render_err = pcall(function()
-        local measure_lines, footer_extra_width = collect_tooltip_measure_lines(slot, item, item_name, item_type, enchant_info)
-        if is_bazaar_listed then
-            table.insert(measure_lines, 2, 'Listed in Bazaar (cannot use/equip)')
-        end
-        local wrap_width = get_tooltip_wrap_width(measure_lines, footer_extra_width)
+        -- Fixed content width without consuming a line (NewLine here left a blank row above the name).
+        imgui.Dummy({ content_width, 0 })
         local body_start_x = imgui.GetCursorPosX()
-        local tags = get_item_flag_tags(item, slot)
-        if #tags > 0 then
-            local tags_width = tooltipicons.measure_status_tags_width(
-                satchel,
-                addon_path,
-                tags,
-                tooltipicons.icons_as_words()
-            )
-            wrap_width = math.max(wrap_width, measure_text_width(item_name) + tags_width + layout_metrics.width_pad)
-            wrap_width = math.min(layout_metrics.max_width, wrap_width)
-        end
-        local name_color = M.get_slot_border_color(slot)
-        render_tooltip_header(item, slot, item_name, name_color, wrap_width, is_bazaar_listed)
-        render_tooltip_name_separator(name_color)
-        imgui.PushTextWrapPos(body_start_x + wrap_width)
+        -- Name/separator keep type color (equipment blue); banner/border use status color.
+        local name_color = M.get_item_type_border_color(slot)
+        render_tooltip_header(item, slot, item_name, name_color, content_width, header_banner, layout_metrics)
+        render_tooltip_name_separator(name_color, layout_metrics.sep_padding, content_width, body_start_x)
+        imgui.PushTextWrapPos(body_start_x + content_width)
 
         if item_type == 7 then
-            local desc = get_item_description_text(item, slot.id)
-            if desc ~= '' then
-                render_desc_with_elements(desc)
+            local sections = build_tooltip_description(slot, item, slot.id)
+            local lore_desc = sections.lore_desc
+            local stats_desc = sections.stats_desc
+
+            if lore_desc == '' and stats_desc == '' then
+                local fallback = sections.body_desc
+                if fallback ~= '' then
+                    render_desc_with_elements(fallback)
+                end
+            else
+                if lore_desc ~= '' then
+                    render_desc_with_elements(lore_desc)
+                end
+                if lore_desc ~= '' and stats_desc ~= '' then
+                    render_tooltip_name_separator(name_color, layout_metrics.sep_padding, content_width, body_start_x)
+                end
+                if stats_desc ~= '' then
+                    render_desc_with_elements(stats_desc)
+                end
             end
         elseif item_type == 4 or item_type == 5 then
             local dmg = item and read_number_field(item, 'Damage') or nil
@@ -2288,10 +2894,13 @@ local function create_item_logic(ctx)
             local jobs = get_equip_jobs_text(item)
             local races = get_item_races_text(item)
             local family = (item_type == 4) and get_weapon_type_text(item) or get_armor_type_text(item)
-            local desc = get_item_description_text(item, slot.id)
+
+            local sections = build_tooltip_description(slot, item, slot.id)
+            local desc = sections.base_desc
+            local body_desc = sections.body_desc
+            local augment_lines = sections.augment_lines
             local desc_has_combat_row = description_has_combat_stats(desc)
-            local body_desc, _ = split_description_augment_lines(desc)
-            local augment_lines = collect_augment_display_lines(slot, desc)
+            local body_has_def = body_desc:match('DEF:%s*%d') ~= nil
 
             local has_stat = false
 
@@ -2312,11 +2921,11 @@ local function create_item_logic(ctx)
                     has_stat = true
                 end
             else
-                if def then
+                if def and not body_has_def then
                     imgui.Text(('DEF:%d'):format(def))
                     has_stat = true
                 end
-                if def and is_plausible_delay(delay) then
+                if def and is_plausible_delay(delay) and not body_desc:match('Delay:%s*%d') then
                     imgui.Text(('Delay:%d'):format(delay))
                     has_stat = true
                 end
@@ -2347,40 +2956,42 @@ local function create_item_logic(ctx)
                 imgui.TextColored({ 0.72, 0.72, 0.72, 1.0 }, 'No additional stats found.')
             end
         else
-            local desc = get_item_description_text(item, slot.id)
+            local sections = build_tooltip_description(slot, item, slot.id)
+            local desc = sections.body_desc ~= '' and sections.body_desc or sections.base_desc
             if desc ~= '' then
                 render_desc_with_elements(desc)
             end
         end
 
-        render_tooltip_footer(slot, item, item_type, enchant_info)
-
         imgui.PopTextWrapPos()
+        ensure_tooltip_footer_width(slot, item, item_type, enchant_info, content_width)
+        render_tooltip_footer(slot, item, item_type, enchant_info, layout_metrics.footer_gap)
+        if is_bazaar_listed then
+            render_tooltip_bazaar_price(slot, body_start_x, content_width, layout_metrics.footer_gap)
+        end
+
         end)
 
         if font_pushed then
-            tooltipfonts.pop_tooltip_font()
+            tooltips.pop_tooltip_font()
         end
         imgui.EndTooltip()
+        imgui.PopStyleColor(border_colors_pushed)
+        imgui.PopStyleVar(1)
 
         if not ok_render then
             error(render_err)
         end
         end)
 
-        tooltipicons.set_catalog_mode(false)
         if not ok then
             error(err)
         end
     end
 
-    function M.get_slot_border_color(slot)
-        if not slot.id or slot.id <= 0 then
+    function M.get_item_type_border_color(slot)
+        if not slot or not slot.id or slot.id <= 0 then
             return satchelcolors.get_empty_slot_border()
-        end
-
-        if is_slot_in_bazaar(slot) then
-            return satchelcolors.get_bazaar_border()
         end
 
         local item_type = M.get_item_type(slot.id)
@@ -2392,6 +3003,36 @@ local function create_item_logic(ctx)
         end
 
         return satchelcolors.get_item_border()
+    end
+
+    -- Status banner for tooltips / context menu (equipped, bazaar). Nil when none.
+    function M.get_item_status_banner(slot)
+        if not slot or not slot.id or slot.id <= 0 then
+            return nil
+        end
+        if is_slot_in_bazaar(slot) then
+            return { text = BAZAAR_BANNER_TEXT, color = satchelcolors.get_bazaar_border() }
+        end
+        if is_slot_currently_equipped(slot) then
+            return { text = EQUIPPED_BANNER_TEXT, color = satchelcolors.get_equipped_border() }
+        end
+        return nil
+    end
+
+    function M.get_slot_border_color(slot)
+        if not slot.id or slot.id <= 0 then
+            return satchelcolors.get_empty_slot_border()
+        end
+
+        if is_slot_in_bazaar(slot) then
+            return satchelcolors.get_bazaar_border()
+        end
+
+        if is_slot_currently_equipped(slot) then
+            return satchelcolors.get_equipped_border()
+        end
+
+        return M.get_item_type_border_color(slot)
     end
 
     function M.get_context_menu_actions(slot)
@@ -2697,8 +3338,23 @@ local function create_item_logic(ctx)
             parts[#parts + 1] = item_name:lower()
         end
 
-        local desc = get_item_description_text(item, item_id)
+        local sections = slot and build_tooltip_description(slot, item, item_id) or nil
+        local desc = sections and sections.base_desc or get_item_description_text(item, item_id)
         local searchable_desc = desc
+
+        if sections and item_type == 7 then
+            if sections.lore_desc ~= '' and sections.stats_desc ~= '' then
+                searchable_desc = sections.lore_desc .. '\n' .. sections.stats_desc
+            elseif sections.stats_desc ~= '' then
+                searchable_desc = sections.stats_desc
+            elseif sections.lore_desc ~= '' then
+                searchable_desc = sections.lore_desc
+            else
+                searchable_desc = sections.body_desc
+            end
+        elseif sections then
+            searchable_desc = sections.body_desc ~= '' and sections.body_desc or desc
+        end
 
         if item_type == 4 or item_type == 5 then
             local family = (item_type == 4) and get_weapon_type_text(item) or get_armor_type_text(item)
@@ -2714,7 +3370,7 @@ local function create_item_logic(ctx)
             end
 
             local desc_has_combat_row = description_has_combat_stats(desc)
-            searchable_desc = select(1, split_description_augment_lines(desc))
+            searchable_desc = sections and sections.body_desc or select(1, split_description_augment_lines(desc))
 
             if item_type == 4 then
                 local dmg = item and read_number_field(item, 'Damage') or nil
@@ -2745,7 +3401,8 @@ local function create_item_logic(ctx)
         append_description_search_lines(parts, searchable_desc ~= '' and searchable_desc or desc)
 
         if slot then
-            for _, augment_line in ipairs(collect_augment_display_lines(slot, desc)) do
+            local augment_lines = sections and sections.augment_lines or collect_augment_display_lines(slot, desc)
+            for _, augment_line in ipairs(augment_lines) do
                 parts[#parts + 1] = augment_line:lower()
             end
 
@@ -2781,6 +3438,15 @@ local function create_item_logic(ctx)
         local normalized = normalize_search_query(query)
         if normalized == '' then
             return true
+        end
+
+        if searchlogic.is_profile_query(normalized) then
+            -- lua/xml profile search only highlights equipment (types 4 and 5).
+            local item_type = M.get_item_type(item_id)
+            if item_type ~= 4 and item_type ~= 5 then
+                return false
+            end
+            return searchlogic.matches_item_id(item_id, normalized)
         end
 
         local compact = compact_search_query(query)

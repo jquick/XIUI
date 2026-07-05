@@ -28,6 +28,9 @@ local hotbarModule = require('config.hotbar');
 local readycheckModule = require('config.readycheck');
 
 local treasurePool = require('modules.treasurepool.init');
+local tooltipfonts = require('modules.satchel.tooltips');
+
+local SATCHEL_SETTINGS_CATEGORY = 9;
 local macropalette = require('modules.hotbar.macropalette');
 local palette = require('modules.hotbar.palette');
 
@@ -660,6 +663,7 @@ config.DrawWindow = function(us)
         treasurePool.ClearPreview();
         gConfig.treasurePoolMiniPreview = false;
         gConfig.treasurePoolFullPreview = false;
+        tooltipfonts.on_satchel_config_hidden();
     end
     local configJustOpened = isConfigOpen and not wasConfigOpen;
     wasConfigOpen = isConfigOpen;
@@ -987,10 +991,14 @@ config.DrawWindow = function(us)
             if settingsDrawFunctions[selectedCategory] then
                 settingsDrawFunctions[selectedCategory]();
             end
+            if selectedCategory ~= SATCHEL_SETTINGS_CATEGORY then
+                tooltipfonts.on_satchel_config_hidden();
+            end
         else
             if colorSettingsDrawFunctions[selectedCategory] then
                 colorSettingsDrawFunctions[selectedCategory]();
             end
+            tooltipfonts.on_satchel_config_hidden();
         end
 
         imgui.EndChild();

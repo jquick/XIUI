@@ -6,7 +6,7 @@
 local M = {};
 local profileManager = require('core.profile_manager');
 
-M.SETTINGS_MIGRATION_VERSION = '1.8.3';
+M.SETTINGS_MIGRATION_VERSION = '1.8.5';
 
 local SATCHEL_PROFILE_KEYS = {
     'showSatchelModule',
@@ -15,7 +15,7 @@ local SATCHEL_PROFILE_KEYS = {
     'satchelCloseOnEscape',
     'satchelTooltipIconsAsWords',
     'satchelTooltipFontFamily',
-    'satchelTooltipScale',
+    'satchelTooltipFontSize',
     'satchelAutoSortBags',
     'satchelHideDuringEvents',
     'satchelHideOnMenuFocus',
@@ -79,11 +79,23 @@ function M.MigrateSettingsVersion(gConfig, defaults)
     end
 
     if gConfig.satchelTooltipFontFamily == nil then
-        gConfig.satchelTooltipFontFamily = defaults.satchelTooltipFontFamily or 'Agave';
+        gConfig.satchelTooltipFontFamily = defaults.satchelTooltipFontFamily or 'Consolas';
     end
 
-    if gConfig.satchelTooltipScale == nil then
-        gConfig.satchelTooltipScale = defaults.satchelTooltipScale or 1.0;
+    do
+        local tooltiplayout = require('modules.satchel.tooltips');
+        if gConfig.satchelTooltipFontSize == nil then
+            if gConfig.satchelTooltipScale ~= nil then
+                gConfig.satchelTooltipFontSize =
+                    tooltiplayout.font_size_from_legacy_scale(gConfig.satchelTooltipScale);
+            else
+                gConfig.satchelTooltipFontSize = defaults.satchelTooltipFontSize or 14;
+            end
+        else
+            gConfig.satchelTooltipFontSize =
+                tooltiplayout.normalize_font_size(gConfig.satchelTooltipFontSize);
+        end
+        gConfig.satchelTooltipScale = nil;
     end
 
     if gConfig.satchelCloseOnEscape == nil then

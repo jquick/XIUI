@@ -13,6 +13,7 @@ local DEFAULTS = {
     emptySlotBorderColor = 0xCC4C473D,
     lockedSlotBorderColor = 0xBF615C51,
     bazaarBorderColor = 0xFFF25252,
+    equippedBorderColor = 0xFFE900DC,
     equipmentBorderColor = 0xFF59A1F2,
     usableBorderColor = 0xFF94DB80,
     itemBorderColor = 0xFFB89959,
@@ -63,6 +64,10 @@ end
 
 function M.get_bazaar_border()
     return M.get_rgba('bazaarBorderColor')
+end
+
+function M.get_equipped_border()
+    return M.get_rgba('equippedBorderColor')
 end
 
 function M.get_equipment_border()

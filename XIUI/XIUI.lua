@@ -98,6 +98,7 @@ local diagnostics = require('libs.diagnostics');
 local TextureManager = require('libs.texturemanager');
 local imtext = require('libs.imtext');
 local components = require('config.components');
+local satchelTooltipFonts = require('modules.satchel.tooltips');
 
 -- Flag to skip settings_update callback during internal saves
 local bInternalSave = false;
@@ -997,6 +998,12 @@ ashita.events.register('d3d_present', 'present_cb', function ()
     if not bInitialized then return; end
 
     local ok, err = pcall(function()
+        -- Deferred satchel tooltip font loads (family/size Selectable). Must run
+        -- before any module/config draw so AddFontFromFileTTF is not mid-frame.
+        if satchelTooltipFonts.has_pending_load() then
+            satchelTooltipFonts.tick_load();
+        end
+
         -- Drop references to textures evicted/cleared during the PREVIOUS
         -- frame so Lua GC is free to run d3d8.gc_safe_release on them.
         -- Must run before anything else this frame queues new draws or
@@ -1093,18 +1100,16 @@ ashita.events.register('load', 'load_cb', function ()
     gConfig.appliedPositions = {};
     UpdateUserSettings();
 
-    -- Satchel wave-dash: detect whether the default font already has U+301C.
-    -- Must not mutate the font atlas (see libs/imtext.lua).
-    pcall(function()
-        require('modules.satchel.tooltipfonts').prewarm_font_glyphs();
-    end);
-
+    -- Custom fonts go into ImGui's shared atlas (survives /addon reload).
+    -- Only prewarm here; satchel Initialize adds the active tooltip family sizes.
+    -- Do not also prewarm the full tooltip catalog — reload would re-add dozens of
+    -- fonts each time, freeze the client, and can exhaust the atlas.
     imtext.PrewarmFonts(components.available_fonts);
 
     uiModules.InitializeAll(gAdjustedSettings);
 
     pcall(function()
-        require('modules.satchel.tooltipicons').preload_assets()
+        require('modules.satchel.tooltips').preload_assets()
     end);
 
     -- Load mob data for current zone

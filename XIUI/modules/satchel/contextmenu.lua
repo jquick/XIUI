@@ -62,13 +62,26 @@ function contextmenu.create(ctx)
         open_pending_popup(satchel.drop_dialog, '##satchel_drop')
 
         local slot = satchel.context_menu.slot
+        -- Match tooltip chrome: status color on border, type color on name/separator.
+        local border_colors_pushed = 0
+        if slot and slot.id and slot.id > 0 then
+            local border_color = items.get_slot_border_color(slot)
+            imgui.PushStyleColor(ImGuiCol_Border, border_color)
+            border_colors_pushed = 1
+            if ImGuiCol_BorderShadow ~= nil then
+                imgui.PushStyleColor(ImGuiCol_BorderShadow, border_color)
+                border_colors_pushed = 2
+            end
+        end
+
         if imgui.BeginPopup('##satchel_ctx') then
             if slot and slot.id and slot.id > 0 then
-                local item_name = items.get_item_name(slot.id) or '?'
-                imgui.TextColored(items.get_slot_border_color(slot), item_name)
-                imgui.Separator()
+                local visual_only_slot = HzLimitedMode
+                    or slot.read_only
+                    or slot.alt_view
+                    or slot.slip_view
 
-                if HzLimitedMode then
+                if visual_only_slot then
                     if on_sort and imgui.MenuItem('Sort Bag') then
                         on_sort(slot)
                         imgui.CloseCurrentPopup()
@@ -120,6 +133,10 @@ function contextmenu.create(ctx)
                 end
             end
             imgui.EndPopup()
+        end
+
+        if border_colors_pushed > 0 then
+            imgui.PopStyleColor(border_colors_pushed)
         end
 
         if imgui.BeginPopupModal('##satchel_bazaar', nil, ImGuiWindowFlags_AlwaysAutoResize or 0) then

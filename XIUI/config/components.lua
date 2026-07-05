@@ -164,7 +164,6 @@ components.available_fonts = {
 };
 
 components.available_tooltip_fonts = {
-    'Agave',
     'Arial',
     'Calibri',
     'Consolas',

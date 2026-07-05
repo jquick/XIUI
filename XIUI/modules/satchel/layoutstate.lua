@@ -1,10 +1,10 @@
 local containerlogic = require('modules.satchel.containerlogic')
-local sortstate = require('modules.satchel.sortstate')
 
 local layoutstate = {}
 
 local DISPLAY_SLOTS = containerlogic.DISPLAY_SLOTS
 local last_identity_key = nil
+local last_sort_identity_key = nil
 
 local function get_player_identity_key()
     local mm = AshitaCore:GetMemoryManager()
@@ -40,6 +40,10 @@ local function copy_slot_entry(slot, display_index)
         id = slot.id,
         count = slot.count,
         locked = slot.locked,
+        read_only = slot.read_only,
+        alt_view = slot.alt_view,
+        slip_view = slot.slip_view,
+        slip_layout_key = slot.slip_layout_key,
         display_index = display_index,
     }
 end
@@ -195,8 +199,59 @@ function layoutstate.get_display_map(container_id, raw_slots, runtime_maps)
     return display_map
 end
 
-function layoutstate.build_display_slots(container_id, raw_slots, runtime_maps)
-    local display_map = layoutstate.get_display_map(container_id, raw_slots, runtime_maps)
+local function clone_display_map(display_map)
+    local copy = {}
+    for display_index = 1, #display_map do
+        copy[display_index] = display_map[display_index]
+    end
+    return copy
+end
+
+local function mutate_display_map_for_move(display_map, raw_slots, src_display, dst_display)
+    src_display = tonumber(src_display)
+    dst_display = tonumber(dst_display)
+    if not display_map or src_display == nil or dst_display == nil or src_display == dst_display then
+        return false
+    end
+
+    local by_memory = {}
+    for _, slot in ipairs(raw_slots or {}) do
+        by_memory[tonumber(slot.slot_index) or -1] = slot
+    end
+
+    local src_mem = tonumber(display_map[src_display + 1])
+    local dst_mem = tonumber(display_map[dst_display + 1])
+    if src_mem == nil or dst_mem == nil then
+        return false
+    end
+
+    local dst_slot = by_memory[dst_mem]
+    local dst_occupied = slot_has_item(dst_slot)
+
+    if not dst_occupied then
+        display_map[src_display + 1] = dst_mem
+        display_map[dst_display + 1] = src_mem
+    elseif math.abs(src_display - dst_display) == 1 then
+        display_map[src_display + 1] = dst_mem
+        display_map[dst_display + 1] = src_mem
+    elseif src_display < dst_display then
+        local moving_mem = src_mem
+        for display_index = src_display, dst_display - 1 do
+            display_map[display_index + 1] = display_map[display_index + 2]
+        end
+        display_map[dst_display + 1] = moving_mem
+    else
+        local moving_mem = src_mem
+        for display_index = src_display, dst_display + 1, -1 do
+            display_map[display_index + 1] = display_map[display_index]
+        end
+        display_map[dst_display + 1] = moving_mem
+    end
+
+    return true
+end
+
+function layoutstate.build_slots_from_display_map(display_map, raw_slots)
     if not display_map then
         return raw_slots or {}
     end
@@ -216,6 +271,28 @@ function layoutstate.build_display_slots(container_id, raw_slots, runtime_maps)
     end
 
     return result
+end
+
+function layoutstate.build_preview_slots_from_map(display_map, raw_slots, src_display, dst_display)
+    if not display_map then
+        return nil
+    end
+
+    local preview_map = clone_display_map(display_map)
+    if not mutate_display_map_for_move(preview_map, raw_slots, src_display, dst_display) then
+        return nil
+    end
+
+    return layoutstate.build_slots_from_display_map(preview_map, raw_slots)
+end
+
+function layoutstate.build_display_slots(container_id, raw_slots, runtime_maps)
+    local display_map = layoutstate.get_display_map(container_id, raw_slots, runtime_maps)
+    if not display_map then
+        return raw_slots or {}
+    end
+
+    return layoutstate.build_slots_from_display_map(display_map, raw_slots)
 end
 
 function layoutstate.reset_container_layout(container_id, raw_slots, runtime_maps)
@@ -252,38 +329,8 @@ function layoutstate.apply_display_move(container_id, raw_slots, runtime_maps, s
         return false
     end
 
-    local by_memory = {}
-    for _, slot in ipairs(raw_slots or {}) do
-        by_memory[tonumber(slot.slot_index) or -1] = slot
-    end
-
-    local src_mem = tonumber(display_map[src_display + 1])
-    local dst_mem = tonumber(display_map[dst_display + 1])
-    if src_mem == nil or dst_mem == nil then
+    if not mutate_display_map_for_move(display_map, raw_slots, src_display, dst_display) then
         return false
-    end
-
-    local dst_slot = by_memory[dst_mem]
-    local dst_occupied = slot_has_item(dst_slot)
-
-    if not dst_occupied then
-        display_map[src_display + 1] = dst_mem
-        display_map[dst_display + 1] = src_mem
-    elseif math.abs(src_display - dst_display) == 1 then
-        display_map[src_display + 1] = dst_mem
-        display_map[dst_display + 1] = src_mem
-    elseif src_display < dst_display then
-        local moving_mem = src_mem
-        for display_index = src_display, dst_display - 1 do
-            display_map[display_index + 1] = display_map[display_index + 2]
-        end
-        display_map[dst_display + 1] = moving_mem
-    else
-        local moving_mem = src_mem
-        for display_index = src_display, dst_display + 1, -1 do
-            display_map[display_index + 1] = display_map[display_index]
-        end
-        display_map[dst_display + 1] = moving_mem
     end
 
     persist_layout_maps(runtime_maps)
@@ -336,16 +383,331 @@ function layoutstate.sync_map_from_visual_slots(container_id, visual_slots, runt
     persist_layout_maps(runtime_maps)
 end
 
+function layoutstate.is_auto_sort_enabled()
+    return gConfig ~= nil and gConfig.satchelAutoSortBags == true
+end
+
+function layoutstate.reload_sort_from_config(runtime_sorted)
+    runtime_sorted = runtime_sorted or {}
+    for key in pairs(runtime_sorted) do
+        runtime_sorted[key] = nil
+    end
+
+    if config and type(config.satchelSortedContainers) == 'table' then
+        for container_key, enabled in pairs(config.satchelSortedContainers) do
+            if enabled == true then
+                local container_id = tonumber(container_key)
+                if container_id ~= nil then
+                    runtime_sorted[container_id] = true
+                end
+            end
+        end
+    end
+end
+
+function layoutstate.ensure_sort_loaded(runtime_sorted)
+    local identity_key = get_player_identity_key()
+    if identity_key == nil then
+        return
+    end
+
+    if identity_key ~= last_sort_identity_key then
+        last_sort_identity_key = identity_key
+        layoutstate.reload_sort_from_config(runtime_sorted)
+    end
+end
+
+function layoutstate.should_visually_sort(container_id, runtime_sorted)
+    if layoutstate.is_auto_sort_enabled() then
+        return true
+    end
+
+    container_id = tonumber(container_id)
+    return container_id ~= nil and runtime_sorted[container_id] == true
+end
+
+function layoutstate.mark_container_sorted(container_id, runtime_sorted)
+    container_id = tonumber(container_id)
+    if container_id == nil then
+        return
+    end
+
+    runtime_sorted[container_id] = true
+
+    if not config then
+        return
+    end
+
+    if type(config.satchelSortedContainers) ~= 'table' then
+        config.satchelSortedContainers = {}
+    end
+
+    config.satchelSortedContainers[tostring(container_id)] = true
+
+    if SaveCharacterSettingsInternal then
+        SaveCharacterSettingsInternal()
+    end
+end
+
+function layoutstate.clear_container_sorted(container_id, runtime_sorted)
+    container_id = tonumber(container_id)
+    if container_id == nil then
+        return
+    end
+
+    runtime_sorted[container_id] = nil
+
+    if not config or type(config.satchelSortedContainers) ~= 'table' then
+        return
+    end
+
+    config.satchelSortedContainers[tostring(container_id)] = nil
+
+    if SaveCharacterSettingsInternal then
+        SaveCharacterSettingsInternal()
+    end
+end
+
 function layoutstate.uses_manual_layout(container_id, runtime_sorted)
-    if sortstate.is_auto_sort_enabled() then
+    if layoutstate.is_auto_sort_enabled() then
         return false
     end
 
-    if sortstate.should_visually_sort(container_id, runtime_sorted) then
+    if layoutstate.should_visually_sort(container_id, runtime_sorted) then
         return false
     end
 
     return true
+end
+
+local function persist_nested_layout_maps(runtime_maps, config_field)
+    if not config then
+        return
+    end
+
+    config[config_field] = config[config_field] or {}
+
+    for alt_key, containers in pairs(runtime_maps) do
+        local saved_alt = {}
+        for container_key, display_map in pairs(containers) do
+            local saved = {}
+            for display_index = 1, #display_map do
+                saved[display_index] = tonumber(display_map[display_index]) or (display_index - 1)
+            end
+            saved_alt[tostring(container_key)] = saved
+        end
+        config[config_field][tostring(alt_key)] = saved_alt
+    end
+
+    if SaveCharacterSettingsInternal then
+        SaveCharacterSettingsInternal()
+    end
+end
+
+local function persist_alt_layout_maps(runtime_maps)
+    persist_nested_layout_maps(runtime_maps, 'satchelAltDisplayLayouts')
+end
+
+local function persist_slip_layout_maps(runtime_maps)
+    persist_nested_layout_maps(runtime_maps, 'satchelSlipDisplayLayouts')
+end
+
+local function persist_runtime_layout_maps(runtime_maps, layout_kind)
+    if layout_kind == 'slip' then
+        persist_slip_layout_maps(runtime_maps)
+    else
+        persist_alt_layout_maps(runtime_maps)
+    end
+end
+
+function layoutstate.reload_slip_from_config(runtime_maps)
+    for key in pairs(runtime_maps) do
+        runtime_maps[key] = nil
+    end
+
+    if not config or type(config.satchelSlipDisplayLayouts) ~= 'table' then
+        return
+    end
+
+    for slip_key, containers in pairs(config.satchelSlipDisplayLayouts) do
+        if type(containers) == 'table' then
+            local runtime_slip = {}
+            for container_key, saved in pairs(containers) do
+                if type(saved) == 'table' then
+                    local display_map = {}
+                    for display_index = 1, #saved do
+                        local memory_index = tonumber(saved[display_index])
+                        if memory_index == nil then
+                            memory_index = display_index - 1
+                        end
+                        display_map[display_index] = memory_index
+                    end
+                    runtime_slip[tonumber(container_key) or container_key] = display_map
+                end
+            end
+            runtime_maps[tostring(slip_key)] = runtime_slip
+        end
+    end
+end
+
+function layoutstate.reload_alt_from_config(runtime_maps)
+    for key in pairs(runtime_maps) do
+        runtime_maps[key] = nil
+    end
+
+    if not config or type(config.satchelAltDisplayLayouts) ~= 'table' then
+        return
+    end
+
+    for alt_key, containers in pairs(config.satchelAltDisplayLayouts) do
+        if type(containers) == 'table' then
+            local runtime_alt = {}
+            for container_key, saved in pairs(containers) do
+                if type(saved) == 'table' then
+                    local display_map = {}
+                    for display_index = 1, DISPLAY_SLOTS do
+                        local memory_index = tonumber(saved[display_index])
+                        if memory_index == nil then
+                            memory_index = display_index - 1
+                        end
+                        display_map[display_index] = memory_index
+                    end
+                    runtime_alt[tonumber(container_key) or container_key] = display_map
+                end
+            end
+            runtime_maps[tostring(alt_key)] = runtime_alt
+        end
+    end
+end
+
+function layoutstate.get_alt_display_map(alt_key, container_id, raw_slots, runtime_maps)
+    alt_key = tostring(alt_key or '')
+    container_id = tonumber(container_id)
+    if alt_key == '' or container_id == nil then
+        return nil
+    end
+
+    runtime_maps[alt_key] = runtime_maps[alt_key] or {}
+
+    local slot_count = #(raw_slots or {})
+    if slot_count <= 0 then
+        slot_count = DISPLAY_SLOTS
+    end
+
+    local display_map = runtime_maps[alt_key][container_id]
+    if not display_map or #display_map ~= slot_count then
+        display_map = build_identity_map(slot_count)
+        runtime_maps[alt_key][container_id] = display_map
+    end
+
+    return display_map
+end
+
+function layoutstate.build_alt_display_slots(alt_key, container_id, raw_slots, runtime_maps)
+    local display_map = layoutstate.get_alt_display_map(alt_key, container_id, raw_slots, runtime_maps)
+    if not display_map then
+        return raw_slots or {}
+    end
+
+    return layoutstate.build_slots_from_display_map(display_map, raw_slots)
+end
+
+function layoutstate.has_custom_alt_layout(alt_key, container_id, raw_slots, runtime_maps)
+    alt_key = tostring(alt_key or '')
+    container_id = tonumber(container_id)
+    if alt_key == '' or container_id == nil then
+        return false
+    end
+
+    local containers = runtime_maps[alt_key]
+    local display_map = containers and containers[container_id]
+    if not display_map then
+        return false
+    end
+
+    local slot_count = #(raw_slots or {})
+    if slot_count <= 0 then
+        slot_count = #display_map
+    end
+
+    for display_index = 1, slot_count do
+        local memory_index = tonumber(display_map[display_index])
+        if memory_index == nil then
+            memory_index = display_index - 1
+        end
+        if memory_index ~= (display_index - 1) then
+            return true
+        end
+    end
+
+    return false
+end
+
+function layoutstate.apply_alt_display_move(alt_key, container_id, raw_slots, runtime_maps, src_display, dst_display, layout_kind)
+    alt_key = tostring(alt_key or '')
+    container_id = tonumber(container_id)
+    src_display = tonumber(src_display)
+    dst_display = tonumber(dst_display)
+    if alt_key == '' or container_id == nil or src_display == nil or dst_display == nil or src_display == dst_display then
+        return false
+    end
+
+    local display_map = layoutstate.get_alt_display_map(alt_key, container_id, raw_slots, runtime_maps)
+    if not display_map then
+        return false
+    end
+
+    if not mutate_display_map_for_move(display_map, raw_slots, src_display, dst_display) then
+        return false
+    end
+
+    persist_runtime_layout_maps(runtime_maps, layout_kind)
+    return true
+end
+
+function layoutstate.sync_alt_map_from_visual_slots(alt_key, container_id, visual_slots, runtime_maps, layout_kind)
+    alt_key = tostring(alt_key or '')
+    container_id = tonumber(container_id)
+    if alt_key == '' or container_id == nil or type(visual_slots) ~= 'table' then
+        return
+    end
+
+    runtime_maps[alt_key] = runtime_maps[alt_key] or {}
+
+    local display_map = {}
+    for display_index, slot in ipairs(visual_slots) do
+        display_map[display_index] = tonumber(slot.slot_index) or (display_index - 1)
+    end
+
+    runtime_maps[alt_key][container_id] = display_map
+    persist_runtime_layout_maps(runtime_maps, layout_kind)
+end
+
+function layoutstate.reset_alt_container_layout(alt_key, container_id, raw_slots, runtime_maps, layout_kind)
+    alt_key = tostring(alt_key or '')
+    container_id = tonumber(container_id)
+    if alt_key == '' or container_id == nil then
+        return
+    end
+
+    local slot_count = #(raw_slots or {})
+    if slot_count <= 0 then
+        slot_count = DISPLAY_SLOTS
+    end
+
+    runtime_maps[alt_key] = runtime_maps[alt_key] or {}
+    runtime_maps[alt_key][container_id] = build_identity_map(slot_count)
+
+    local config_field = (layout_kind == 'slip') and 'satchelSlipDisplayLayouts' or 'satchelAltDisplayLayouts'
+    if config and config[config_field] then
+        local saved_alt = config[config_field][alt_key]
+        if type(saved_alt) == 'table' then
+            saved_alt[tostring(container_id)] = nil
+        end
+        if SaveCharacterSettingsInternal then
+            SaveCharacterSettingsInternal()
+        end
+    end
 end
 
 return layoutstate
