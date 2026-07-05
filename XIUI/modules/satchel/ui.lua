@@ -546,18 +546,23 @@ function ui.render_toolbar_with_search(search_buffer, scale, id_suffix, buttons,
     id_suffix = tostring(id_suffix or 'main')
 
     local gap = ui.scaled(8, scale)
-    local has_active_search = opts.search_active == true
+    local active_search_text = normalize_search_query(opts.active_search_text or '')
+    local draft_text = (type(search_buffer) == 'table' and search_buffer[1]) or ''
+    local draft_normalized = normalize_search_query(draft_text)
+    local has_active_search = opts.search_active == true or active_search_text ~= ''
+    local draft_differs = draft_normalized ~= active_search_text
+    local show_cancel = has_active_search and active_search_text ~= '' and not draft_differs
     -- Reserve the wider of Search/Cancel so the field width does not jump on toggle.
     local action_width = math.max(
         measure_toolbar_button_width(('Search##satchel_search_go_%s'):format(id_suffix)),
         measure_toolbar_button_width(('Cancel##satchel_search_go_%s'):format(id_suffix))
     )
     local action_button = {
-        id = has_active_search and 'cancel' or 'search',
-        label = has_active_search
+        id = show_cancel and 'cancel' or 'search',
+        label = show_cancel
             and ('Cancel##satchel_search_go_%s'):format(id_suffix)
             or ('Search##satchel_search_go_%s'):format(id_suffix),
-        enabled = has_active_search,
+        enabled = show_cancel or draft_text ~= '',
     }
     local visible_buttons = { action_button }
     for _, button in ipairs(buttons) do
@@ -582,8 +587,7 @@ function ui.render_toolbar_with_search(search_buffer, scale, id_suffix, buttons,
     local button_gap = (#visible_buttons > 0) and gap or 0
     local search_w = math.max(ui.scaled(80, scale), align_width - buttons_w - button_gap)
     local enter_pressed, input_focused = ui.render_search_bar(search_buffer, search_w, scale, id_suffix)
-    local draft_text = (type(search_buffer) == 'table' and search_buffer[1]) or ''
-    if not has_active_search then
+    if not show_cancel then
         action_button.enabled = draft_text ~= ''
     end
 
@@ -600,7 +604,7 @@ function ui.render_toolbar_with_search(search_buffer, scale, id_suffix, buttons,
     if enter_pressed then
         if draft_text ~= '' then
             clicks.search = true
-        elseif has_active_search then
+        elseif show_cancel then
             clicks.cancel = true
         end
     end

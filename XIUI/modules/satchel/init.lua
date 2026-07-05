@@ -30,6 +30,7 @@ local KEYEVENTF_EXTENDEDKEY = 0x0001
 -- Arm a short trail from the draw-path poll; after focus drops, HandleKey can
 -- eat key-up/repeats. 400ms covers a realistic commit press.
 local ENTER_BLOCK_TRAIL_SEC = 0.4
+local GIL_ICON_PATH = addon.path .. '..\\satchel\\assets\\gil.png'
 
 pcall(function()
     ffi.cdef[[
@@ -227,11 +228,18 @@ function footer.format_gil_text(n)
 end
 
 function footer.load_gil_icon()
+    local tex = icons.load_file_icon(satchel, 'gil', GIL_ICON_PATH)
+    if tex then
+        return tex
+    end
     return TextureManager.getFileTexture('gil')
 end
 
 function footer.get_gil_icon_ptr(texture)
-    return TextureManager.getTexturePtr(texture)
+    if not texture then
+        return nil
+    end
+    return icons.tex_ptr(texture) or TextureManager.getTexturePtr(texture)
 end
 
 local items = itemlogic.create({
@@ -239,6 +247,8 @@ local items = itemlogic.create({
     imgui = imgui,
     addon_path = addon.path,
     format_gil_text = footer.format_gil_text,
+    load_gil_icon = footer.load_gil_icon,
+    get_gil_icon_ptr = footer.get_gil_icon_ptr,
 })
 
 local tab_order = containerlogic.tab_order
@@ -2116,6 +2126,7 @@ local function draw_slip_content_window(scale)
                 align_width = metrics.grid_width + metrics.scrollbar_w,
                 centered = true,
                 search_active = active_search ~= '',
+                active_search_text = active_search,
             }
         )
         if alt_key then
@@ -2284,6 +2295,7 @@ local function draw_alt_inventory_window(scale)
             {
                 align_width = ui.get_toolbar_grid_align_width(metrics, scale, #available_tabs, metrics.grid_height),
                 search_active = alt_search ~= '',
+                active_search_text = alt_search,
                 is_dragging = satchel.drag.alt.active == true,
                 highlight_button_ids = alt_search ~= '' and {
                     slips = alt_has_slip_matches,
@@ -2439,6 +2451,10 @@ function M.DrawWindow()
 
     local scale = ui.get_global_scale()
 
+    if sync_display_settings() then
+        invalidate_slot_cache()
+    end
+
     if not satchel.visible[1] then
         draw_auxiliary_windows(scale)
         tick_search_enter_guard()
@@ -2447,9 +2463,6 @@ function M.DrawWindow()
         return
     end
 
-    if sync_display_settings() then
-        invalidate_slot_cache()
-    end
     local _, slots_by_container, stats = get_slot_data(false)
     tick_auto_sort_server(stats)
 
@@ -2492,6 +2505,7 @@ function M.DrawWindow()
             {
                 align_width = ui.get_toolbar_grid_align_width(metrics, scale, #display_tabs, metrics.grid_height),
                 search_active = main_search ~= '',
+                active_search_text = main_search,
                 is_dragging = main_dragging,
                 -- true = ant border; false = dim only (alt never matches, dimmed for uniformity).
                 highlight_button_ids = main_search ~= '' and {

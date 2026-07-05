@@ -38,6 +38,8 @@ local function create_item_logic(ctx)
     local imgui = ctx.imgui
     local addon_path = ctx.addon_path or ''
     local format_gil_text = ctx.format_gil_text
+    local load_gil_icon = ctx.load_gil_icon
+    local get_gil_icon_ptr = ctx.get_gil_icon_ptr
 
     local job_abbr = {
         [1] = 'WAR',
@@ -2764,8 +2766,8 @@ local function create_item_logic(ctx)
         local metrics = get_tooltip_layout_metrics()
         local icon_size = metrics.tag_size or tooltips.TAG_ICON_SIZE
         local icon_gap = 4
-        local tex = TextureManager.getFileTexture('gil')
-        local ptr = TextureManager.getTexturePtr(tex)
+        local tex = load_gil_icon and load_gil_icon() or TextureManager.getFileTexture('gil')
+        local ptr = tex and ((get_gil_icon_ptr and get_gil_icon_ptr(tex)) or TextureManager.getTexturePtr(tex)) or nil
         local text_w = tonumber(imgui.CalcTextSize(display_text)) or 0
         local total_w = text_w + (ptr and (icon_size + icon_gap) or 0)
         local start_x = content_left + math.max(0, (content_width - total_w) * 0.5)
@@ -2966,7 +2968,7 @@ local function create_item_logic(ctx)
         imgui.PopTextWrapPos()
         ensure_tooltip_footer_width(slot, item, item_type, enchant_info, content_width)
         render_tooltip_footer(slot, item, item_type, enchant_info, layout_metrics.footer_gap)
-        if is_bazaar_listed then
+        if is_slot_in_bazaar(slot) then
             render_tooltip_bazaar_price(slot, body_start_x, content_width, layout_metrics.footer_gap)
         end
 
