@@ -73,6 +73,7 @@ local SPELL_DURATIONS = {
     [216] = {duration = 120}, -- Gravity
     [254] = {duration = 180}, -- Blind
     [276] = {duration = 180}, -- Blind II
+    [112] = {duration = 12},  -- Flash
     [59] = {duration = 120},  -- Silence
     [359] = {duration = 120}, -- Silencega
     [253] = {duration = 60},  -- Sleep

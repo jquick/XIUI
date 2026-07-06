@@ -4,11 +4,11 @@ local imgui = require('imgui');
 local statusHandler = require('handlers.statushandler');
 local debuffHandler = require('handlers.debuffhandler');
 local actionTracker = require('handlers.actiontracker');
+local enemyCasts = require('handlers.enemycasts');
 local progressbar = require('libs.progressbar');
 local statusIcons = require('libs.statusicons');
 local buffTable = require('libs.bufftable');
 local imtext = require('libs.imtext');
-local encoding = require('libs.encoding');
 local ffi = require("ffi");
 local defaultPositions = require('libs.defaultpositions');
 local TextureManager = require('libs.texturemanager');
@@ -23,7 +23,6 @@ local arrowTexture;
 local lockTexture;
 local targetbar = {
 	interpolation = {},
-	enemyCasts = {}, -- Track enemy casting: [serverId] = {spellName, timestamp}
 	-- Exported name text position for mob info snap feature
 	nameTextInfo = {
 		x = 0,        -- X position after name text ends
@@ -541,51 +540,48 @@ targetbar.DrawWindow = function(settings)
 			imtext.Draw(drawList, distString, distX, distY, desiredDistColor, distFontSize);
 		end
 
-		-- Draw enemy cast bar and text if casting (or in config mode) and if enabled
-		local castData = targetbar.enemyCasts[targetEntity.ServerId];
+		-- Draw enemy cast bar and text if casting (or in config mode) and if enabled.
+		-- Remembered so we can reserve matching layout space below.
+		local castBarDrawn = false;
+		if (gConfig.showTargetBarCastBar and not HzLimitedMode) then
+			local drawCast, progress, castOverlay, castDisplayText;
+			if (inConfigMode and enemyCasts.GetCast(targetEntity.ServerId) == nil) then
+				-- Demo cast that loops every 5s for config preview.
+				drawCast, progress, castDisplayText = true, (os.clock() % 5.0) / 5.0, "Fire III (Demo)";
+			else
+				drawCast, progress, castOverlay, castDisplayText = enemyCasts.GetRenderState(targetEntity.ServerId);
+			end
 
-		-- Create test cast data for config mode
-		if (inConfigMode and castData == nil) then
-			castData = T{
-				spellName = "Fire III",
-				castTime = 5.0,  -- 5 second cast
-				startTime = os.clock() - ((os.clock() % 5.0)),  -- Loops every 5 seconds
-			};
-		end
+			if (drawCast) then
+				castBarDrawn = true;
+				-- Draw cast bar under HP bar using user-configurable offsets and scaling
+				local castBarY = startY + settings.barHeight + settings.castBarOffsetY;
+				-- Right-align the cast bar with the HP bar (accounting for bookends and 12px padding)
+				local castBarX = startX + settings.barWidth - bookendWidth - settings.castBarWidth - 12 + settings.castBarOffsetX;
 
-		if (gConfig.showTargetBarCastBar and (not HzLimitedMode) and castData ~= nil and castData.spellName ~= nil and castData.castTime ~= nil and castData.startTime ~= nil) then
-			-- Calculate cast progress
-			local elapsed = os.clock() - castData.startTime;
-			local progress = math.min(elapsed / castData.castTime, 1.0);
+				-- Cast bar settings (using adjusted settings)
+				local castBarHeight = settings.castBarHeight;
+				local castBarWidth = settings.castBarWidth;
+				local castGradient = GetCustomGradient(gConfig.colorCustomization.targetBar, 'castBarGradient') or {'#ffaa00', '#ffcc44'};
 
-			-- Draw cast bar under HP bar using user-configurable offsets and scaling
-			local castBarY = startY + settings.barHeight + settings.castBarOffsetY;
-			-- Right-align the cast bar with the HP bar (accounting for bookends and 12px padding)
-			local castBarX = startX + settings.barWidth - bookendWidth - settings.castBarWidth - 12 + settings.castBarOffsetX;
+				-- Draw cast bar with absolute positioning (doesn't affect ImGui layout)
+				progressbar.ProgressBar(
+					{{progress, castGradient, castOverlay}},
+					{castBarWidth, castBarHeight},
+					{
+						decorate = gConfig.showTargetBarBookends,
+						absolutePosition = {castBarX, castBarY}
+					}
+				);
 
-			-- Cast bar settings (using adjusted settings)
-			local castBarHeight = settings.castBarHeight;
-			local castBarWidth = settings.castBarWidth;
-			local castGradient = GetCustomGradient(gConfig.colorCustomization.targetBar, 'castBarGradient') or {'#ffaa00', '#ffcc44'};
-
-			-- Draw cast bar with absolute positioning (doesn't affect ImGui layout)
-			progressbar.ProgressBar(
-				{{progress, castGradient}},
-				{castBarWidth, castBarHeight},
-				{
-					decorate = gConfig.showTargetBarBookends,
-					absolutePosition = {castBarX, castBarY}
-				}
-			);
-
-			-- Draw cast text below the cast bar (centered on cast bar)
-			imtext.SetConfigFromSettings(settings.cast_font_settings);
-			local castFontSize = settings.cast_font_settings.font_height;
-			local castDisplayText = inConfigMode and "Fire III (Demo)" or castData.spellName;
-			local castWidth, _ = imtext.Measure(castDisplayText, castFontSize);
-			local centerX = castBarX + (castBarWidth / 2);
-			local castColor = gConfig.colorCustomization.targetBar.castTextColor;
-			imtext.Draw(drawList, castDisplayText, centerX - castWidth / 2, castBarY + castBarHeight + 2, castColor, castFontSize);
+				-- Draw cast text below the cast bar (centered on cast bar)
+				imtext.SetConfigFromSettings(settings.cast_font_settings);
+				local castFontSize = settings.cast_font_settings.font_height;
+				local castWidth, _ = imtext.Measure(castDisplayText, castFontSize);
+				local centerX = castBarX + (castBarWidth / 2);
+				local castColor = gConfig.colorCustomization.targetBar.castTextColor;
+				imtext.Draw(drawList, castDisplayText, centerX - castWidth / 2, castBarY + castBarHeight + 2, castColor, castFontSize);
+			end
 		end
 
 		-- Draw buffs and debuffs
@@ -687,7 +683,7 @@ targetbar.DrawWindow = function(settings)
 
 		-- Reserve space for cast bar at bottom of window to prevent clipping
 		-- Calculate total height needed: offset Y + bar height + text spacing + text height
-		if (gConfig.showTargetBarCastBar and (not HzLimitedMode) and castData ~= nil and castData.spellName ~= nil) then
+		if (castBarDrawn) then
 			local castTextHeight = settings.cast_font_settings.font_height;
 			local totalCastBarSpace = settings.castBarOffsetY + settings.castBarHeight + 2 + castTextHeight;
 			imgui.Dummy({0, totalCastBarSpace});
