@@ -7,6 +7,7 @@ require('common');
 require('handlers.helpers');
 local imgui = require('imgui');
 local imtext = require('libs.imtext');
+local drawing = require('libs.drawing');
 local defaultPositions = require('libs.defaultpositions');
 
 local BaseTracker = {};
@@ -39,8 +40,8 @@ local function GetTextColor(usedSlots, colorConfig, threshold1, threshold2, useT
     end
 end
 
--- Draw dots for a single container
-local function DrawContainerDots(locX, locY, framePaddingX, usedSlots, maxSlots, settings, colorConfig, threshold1, threshold2)
+-- Draw slot dots clipped to the viewport so partially off-screen trackers stay draggable.
+local function DrawContainerDots(locX, locY, framePaddingX, usedSlots, maxSlots, settings, colorConfig, threshold1, threshold2, drawList)
     local emptyColor = colorConfig.emptySlotColor;
     local usedColor = GetUsedSlotColor(usedSlots, colorConfig, threshold1, threshold2);
 
@@ -51,22 +52,26 @@ local function DrawContainerDots(locX, locY, framePaddingX, usedSlots, maxSlots,
     groupOffsetX = groupOffsetX + settings.groupSpacing;
     local numPerGroup = settings.rowCount * settings.columnCount;
 
-    for i = 1, maxSlots do
-        local groupNum = math.ceil(i / numPerGroup);
-        local offsetFromGroup = i - ((groupNum - 1) * numPerGroup);
+    drawing.ClipDrawListToViewport(drawList, function()
+        for i = 1, maxSlots do
+            local groupNum = math.ceil(i / numPerGroup);
+            local offsetFromGroup = i - ((groupNum - 1) * numPerGroup);
 
-        local rowNum = math.ceil(offsetFromGroup / settings.columnCount);
-        local columnNum = offsetFromGroup - ((rowNum - 1) * settings.columnCount);
-        local x, y = GetDotOffset(rowNum, columnNum, settings);
-        x = x + ((groupNum - 1) * groupOffsetX);
+            local rowNum = math.ceil(offsetFromGroup / settings.columnCount);
+            local columnNum = offsetFromGroup - ((rowNum - 1) * settings.columnCount);
+            local x, y = GetDotOffset(rowNum, columnNum, settings);
+            x = x + ((groupNum - 1) * groupOffsetX);
 
-        if (i > usedSlots) then
-            draw_circle({x + locX + framePaddingX, y + locY}, settings.dotRadius, emptyColorArray, settings.dotRadius * 3, true)
-        else
-            draw_circle({x + locX + framePaddingX, y + locY}, settings.dotRadius, usedColorArray, settings.dotRadius * 3, true)
-            draw_circle({x + locX + framePaddingX, y + locY}, settings.dotRadius, emptyColorArray, settings.dotRadius * 3, false)
+            local centerX = x + locX + framePaddingX;
+            local centerY = y + locY;
+            if (i > usedSlots) then
+                draw_circle({centerX, centerY}, settings.dotRadius, emptyColorArray, settings.dotRadius * 3, true, nil, drawList);
+            else
+                draw_circle({centerX, centerY}, settings.dotRadius, usedColorArray, settings.dotRadius * 3, true, nil, drawList);
+                draw_circle({centerX, centerY}, settings.dotRadius, emptyColorArray, settings.dotRadius * 3, false, nil, drawList);
+            end
         end
-    end
+    end);
 end
 
 -- Calculate window size for dots display
@@ -88,10 +93,56 @@ local function CalculateDotsWindowSize(maxSlots, settings)
     return winSizeX, winSizeY, groupOffsetX, totalGroups;
 end
 
+-- Estimate content size before Begin for off-screen culling.
+local function EstimateContainerWindowSize(maxSlots, settings, showDots, showText, fontSize, label, usedSlots)
+    local winSizeX = 80;
+    local winSizeY = 24;
+    local groupOffsetX, totalGroups;
+
+    if showDots then
+        winSizeX, winSizeY, groupOffsetX, totalGroups = CalculateDotsWindowSize(maxSlots > 0 and maxSlots or 30, settings);
+    end
+
+    local textHeight = 0;
+    if showText then
+        local displayText = (label and (label .. ' ') or '') .. usedSlots .. '/' .. maxSlots;
+        local textWidth;
+        textWidth, textHeight = imtext.Measure(displayText, fontSize);
+        if not showDots then
+            winSizeX = textWidth;
+            winSizeY = textHeight;
+        end
+    end
+
+    return winSizeX, winSizeY + textHeight, groupOffsetX, totalGroups, textHeight;
+end
+
+-- Skip trackers with no viewport overlap unless config is open (for repositioning).
+local function ShouldSkipOffScreenTracker(windowName, width, height)
+    if showConfig and showConfig[1] then
+        return false;
+    end
+
+    local saved = gConfig.windowPositions and gConfig.windowPositions[windowName];
+    if saved == nil then
+        return false;
+    end
+
+    return not IsRectVisibleOnScreen(saved.x, saved.y, width, height);
+end
+
 -- Draw a single container window (used for both combined and per-container modes)
 -- label: optional prefix like "W1" or "S2" for per-container mode
 -- textUseThresholdColor: if true, text color follows dot threshold colors
 local function DrawSingleContainerWindow(windowName, usedSlots, maxSlots, settings, colorConfig, threshold1, threshold2, drawList, fontSize, showDots, showText, label, textUseThresholdColor)
+    local estW, estH, groupOffsetX, totalGroups, textHeight = EstimateContainerWindowSize(
+        maxSlots, settings, showDots, showText, fontSize, label, usedSlots
+    );
+
+    if ShouldSkipOffScreenTracker(windowName, estW, estH) then
+        return;
+    end
+
     imgui.SetNextWindowSize({-1, -1}, ImGuiCond_Always);
 
     ApplyWindowPosition(windowName);
@@ -117,57 +168,45 @@ local function DrawSingleContainerWindow(windowName, usedSlots, maxSlots, settin
         local DEBUG_DRAW = false;
 
         if showDots then
-            local winSizeX, winSizeY, groupOffsetX, totalGroups = CalculateDotsWindowSize(maxSlots > 0 and maxSlots or 30, settings);
+            local winSizeX, winSizeY = estW, estH - (showText and textHeight or 0);
 
-            -- Calculate text dimensions if showing text (needed for combined draggable area)
-            local textWidth, textHeight = 0, 0;
+            local textWidth = 0;
             local displayText;
             if showText then
                 displayText = (label and (label .. ' ') or '') .. usedSlots .. '/' .. maxSlots;
-                textWidth, textHeight = imtext.Measure(displayText, fontSize);
+                textWidth = imtext.Measure(displayText, fontSize);
             end
 
-            -- Create dummy that covers both text (above) and dots areas for dragging
             local totalHeight = winSizeY + (showText and textHeight or 0);
             imgui.Dummy({winSizeX, totalHeight});
 
-            -- DEBUG: Draw red rectangle around draggable area
             if DEBUG_DRAW then
                 local debugDrawList = imgui.GetWindowDrawList();
                 debugDrawList:AddRect({locX, locY}, {locX + winSizeX, locY + totalHeight}, 0xFF0000FF, 0, 0, 2);
             end
 
-            -- Dots are drawn below the text
             local dotsOffsetY = showText and textHeight or 0;
-            DrawContainerDots(locX, locY + dotsOffsetY, framePaddingX, usedSlots, maxSlots, settings, colorConfig, threshold1, threshold2);
+            DrawContainerDots(locX, locY + dotsOffsetY, framePaddingX, usedSlots, maxSlots, settings, colorConfig, threshold1, threshold2, drawList);
 
             if showText then
-                -- Position text above the dots, right-aligned to the actual dots edge
-                -- Right-aligned: left edge = right edge - textWidth
                 local dotsWidth = (groupOffsetX * totalGroups) - settings.groupSpacing + settings.dotRadius;
                 local textX = locX + framePaddingX + dotsWidth - textWidth;
                 local textColor = GetTextColor(usedSlots, colorConfig, threshold1, threshold2, textUseThresholdColor);
                 imtext.Draw(drawList, displayText, textX, locY, textColor, fontSize);
             end
         elseif showText then
-            -- Text-only mode
             local displayText = (label and (label .. ' ') or '') .. usedSlots .. '/' .. maxSlots;
-            local textWidth, textHeight = imtext.Measure(displayText, fontSize);
+            local textWidth, textHeightOnly = imtext.Measure(displayText, fontSize);
 
-            -- Get cursor position (where content actually starts, after window padding)
             local cursorX, cursorY = imgui.GetCursorScreenPos();
 
-            -- Create invisible dummy for dragging that matches text size
-            imgui.Dummy({textWidth, textHeight});
+            imgui.Dummy({textWidth, textHeightOnly});
 
-            -- DEBUG: Draw red rectangle around draggable area
             if DEBUG_DRAW then
                 local debugDrawList = imgui.GetWindowDrawList();
-                debugDrawList:AddRect({cursorX, cursorY}, {cursorX + textWidth, cursorY + textHeight}, 0xFF0000FF, 0, 0, 2);
+                debugDrawList:AddRect({cursorX, cursorY}, {cursorX + textWidth, cursorY + textHeightOnly}, 0xFF0000FF, 0, 0, 2);
             end
 
-            -- Position text at cursor position (over the dummy area)
-            -- Left edge is cursorX (right-aligned equivalent: cursorX + textWidth - textWidth)
             local textColor = GetTextColor(usedSlots, colorConfig, threshold1, threshold2, textUseThresholdColor);
             imtext.Draw(drawList, displayText, cursorX, cursorY, textColor, fontSize);
         end

@@ -5,6 +5,7 @@ local imtext = require('libs.imtext');
 local debuffHandler = require('handlers.debuffhandler');
 local statusHandler = require('handlers.statushandler');
 local actionTracker = require('handlers.actiontracker');
+local enemyCasts = require('handlers.enemycasts');
 local progressbar = require('libs.progressbar');
 local defaultPositions = require('libs.defaultpositions');
 
@@ -60,6 +61,12 @@ local previewTargets = {
     [9006] = nil,               -- No target
     [9007] = 'Longtargetname',
     [9008] = 'Redmage',
+};
+
+-- Preview cast spell names for config mode (keyed by preview enemy index)
+local previewCasts = {
+    [9002] = 'Fire III',
+    [9003] = 'Cure IV',
 };
 
 -- Cache for truncated names to avoid expensive binary search every frame
@@ -249,10 +256,28 @@ enemylist.DrawWindow = function(settings)
 					infoRowHeight = settings.percent_font_settings.font_height;
 				end
 
+				-- Cast bar: resolve render state once (also clears finished/interrupted casts).
+				local castBarHeight = barHeight;
+				local castTextHeight = settings.distance_font_settings.font_height;
+				local hasCast, castProgress, castOverlay, castSpellName, castTargetId = false;
+				if (gConfig.showEnemyListCastBar and not HzLimitedMode) then
+					if isPreviewMode then
+						castSpellName = previewCasts[k];
+						hasCast = castSpellName ~= nil;
+						castProgress = (os.clock() % 5.0) / 5.0;  -- looping demo fill
+					elseif ent.ServerId ~= nil then
+						hasCast, castProgress, castOverlay, castSpellName, castTargetId = enemyCasts.GetRenderState(ent.ServerId);
+					end
+				end
+
 				-- Calculate total height based on which rows are visible
 				local totalContentHeight = nameHeight + nameToBarGap + barHeight;
 				if (infoRowHeight > 0) then
 					totalContentHeight = totalContentHeight + barToInfoGap + infoRowHeight;
+				end
+				if (hasCast) then
+					totalContentHeight = totalContentHeight + barToInfoGap + castBarHeight
+						+ math.max(2 * scaleY, 1) + castTextHeight;
 				end
 				local entryHeight = (padding * 2) + totalContentHeight;
 
@@ -367,6 +392,50 @@ enemylist.DrawWindow = function(settings)
 						local hpColor = gConfig.colorCustomization.enemyList.percentTextColor;
 						local hpWidth, _ = imtext.Measure(hpText, settings.percent_font_settings.font_height);
 						imtext.Draw(drawList, hpText, entryStartX + entryWidth - padding - hpWidth, row3Y, hpColor, settings.percent_font_settings.font_height);
+					end
+				end
+
+				-- ROW 4: Cast bar + spell name (only while an enemy is casting)
+				if (hasCast) then
+					local contentBottomY = row2Y + barHeight;
+					if (infoRowHeight > 0) then
+						contentBottomY = contentBottomY + barToInfoGap + infoRowHeight;
+					end
+					local castBarY = contentBottomY + barToInfoGap;
+
+					imgui.SetCursorScreenPos({barX, castBarY});
+					local castGradient = GetCustomGradient(gConfig.colorCustomization.enemyList, 'castBarGradient') or {'#ffaa00', '#ffcc44'};
+					progressbar.ProgressBar(
+						{{castProgress, castGradient, castOverlay}},
+						{barWidth, castBarHeight},
+						{decorate = gConfig.showEnemyListBookends}
+					);
+
+					-- "<spell> - <target>" centered below the bar; target in its own color.
+					imtext.SetConfigFromSettings(settings.distance_font_settings);
+					local castColor = gConfig.colorCustomization.enemyList.castTextColor or 0xFFFFAA00;
+
+					-- Who the enemy is casting on, from the begin-cast packet's target id.
+					-- Skip it when the enemy is casting on itself (buffs/self-heals).
+					local castTargetName;
+					if isPreviewMode then
+						castTargetName = previewTargets[k];
+					elseif castTargetId ~= nil and castTargetId ~= ent.ServerId then
+						local castTargetIdx = GetIndexFromId(castTargetId);
+						local castTargetEnt = castTargetIdx ~= nil and castTargetIdx > 0 and GetEntity(castTargetIdx) or nil;
+						castTargetName = castTargetEnt ~= nil and castTargetEnt.Name or nil;
+					end
+
+					local suffix = castTargetName and (' - ' .. castTargetName) or nil;
+					local spellWidth = imtext.Measure(castSpellName, castTextHeight);
+					local suffixWidth = suffix and imtext.Measure(suffix, castTextHeight) or 0;
+					local castTextX = barX + (barWidth / 2) - ((spellWidth + suffixWidth) / 2);
+					local castTextY = castBarY + castBarHeight + math.max(2 * scaleY, 1);
+
+					imtext.Draw(drawList, castSpellName, castTextX, castTextY, castColor, castTextHeight);
+					if (suffix) then
+						local castTargetColor = gConfig.colorCustomization.enemyList.castTargetTextColor or 0xFF66CCFF;
+						imtext.Draw(drawList, suffix, castTextX + spellWidth, castTextY, castTargetColor, castTextHeight);
 					end
 				end
 

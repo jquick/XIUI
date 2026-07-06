@@ -5,6 +5,7 @@
 
 require("common");
 require('handlers.helpers');
+local persistedWindow = require('libs.persisted_window');
 local statusHandler = require('handlers.statushandler');
 local imgui = require("imgui");
 local ffi = require("ffi");
@@ -43,12 +44,13 @@ local wasConfigOpen = false;
 local lastConfigPosX, lastConfigPosY = 20, 20;
 local lastConfigSizeW, lastConfigSizeH = 900, 650;
 local configHasBeenOpened = false;
+local pendingRecoverPosition = false;
 
 -- Global modal state (accessible by other modules to know when to dim foreground elements)
 _XIUI_MODAL_OPEN = false;
 
 -- Helper function to render a social icon button with box background
-local function RenderSocialButton(texture, buttonId, onClickCallback, bgLight, bgLighter, borderDark, boxSize, iconSize)
+local function RenderSocialButton(texture, buttonId, onClickCallback, bgLight, bgLighter, borderDark, boxSize, iconSize, tooltipText)
     if texture == nil or texture.image == nil then
         return;
     end
@@ -91,16 +93,22 @@ local function RenderSocialButton(texture, buttonId, onClickCallback, bgLight, b
     if imgui.IsItemClicked() then
         onClickCallback();
     end
+
+    if tooltipText and imgui.IsItemHovered() then
+        imgui.SetTooltip(tooltipText);
+    end
 end
 
 -- State for confirmation dialogs
 local showRestoreDefaultsConfirm = false;
+local showRecoverUIPositionsConfirm = false;
 
 -- Social icon textures
 local discordTexture = nil;
 local githubTexture = nil;
 local heartTexture = nil;
 local refreshTexture = nil;
+local recoverUIPositionsTexture = nil;
 
 -- Credits popup state
 local creditsWindowOpen = { false };
@@ -330,6 +338,138 @@ local categories = {
     { name = 'hotbar', label = 'Hotbar' },
     { name = 'readyCheck', label = 'Ready Check' },
 };
+
+local recoverUIModules = {};
+local recoverUISelections = {};
+for i = 2, #categories do
+    local category = categories[i];
+    recoverUIModules[#recoverUIModules + 1] = category;
+    recoverUISelections[category.name] = { false };
+end
+
+local function ResetRecoverUISelections()
+    for _, module in ipairs(recoverUIModules) do
+        recoverUISelections[module.name][1] = false;
+    end
+end
+
+local function HasRecoverUISelection()
+    for _, module in ipairs(recoverUIModules) do
+        if recoverUISelections[module.name][1] then
+            return true;
+        end
+    end
+    return false;
+end
+
+local RECOVER_UI_PICKER_WIDTH = 510;
+
+local function DrawCenteredModalText(text)
+    local textWidth = imgui.CalcTextSize(text);
+    imgui.SetCursorPosX((imgui.GetWindowWidth() - textWidth) / 2);
+    imgui.Text(text);
+end
+
+local MODAL_WARNING_TEXT_COLOR = { 1.0, 0.3, 0.3, 1.0 };
+
+local function DrawCenteredModalTextColored(text, color)
+    local textWidth = imgui.CalcTextSize(text);
+    imgui.SetCursorPosX((imgui.GetWindowWidth() - textWidth) / 2);
+    imgui.TextColored(color, text);
+end
+
+local MODAL_BUTTON_WIDTH = 120;
+local confirmPopupOpenAt = {};
+
+local function DrawModalSectionGap(multiplier)
+    multiplier = multiplier or 1;
+    local itemSpacing = imgui.GetStyle().ItemSpacing;
+    local gap = itemSpacing.y * multiplier;
+    imgui.PushStyleVar(ImGuiStyleVar_ItemSpacing, { itemSpacing.x, 0 });
+    imgui.Dummy({ 1, gap });
+    imgui.PopStyleVar();
+end
+
+local function DrawCenteredModalButtons(onConfirm, onCancel, confirmEnabled)
+    if confirmEnabled == nil then confirmEnabled = true; end
+
+    local buttonSpacing = imgui.GetStyle().ItemSpacing.x;
+    local totalButtonWidth = (MODAL_BUTTON_WIDTH * 2) + buttonSpacing;
+    imgui.SetCursorPosX((imgui.GetWindowWidth() - totalButtonWidth) / 2);
+
+    if imgui.BeginDisabled then imgui.BeginDisabled(not confirmEnabled); end
+    if imgui.Button("Confirm", { MODAL_BUTTON_WIDTH, 0 }) and confirmEnabled then
+        onConfirm();
+        imgui.CloseCurrentPopup();
+    end
+    if imgui.BeginDisabled then imgui.EndDisabled(); end
+    imgui.SameLine();
+    if imgui.Button("Cancel", { MODAL_BUTTON_WIDTH, 0 }) then
+        if onCancel then
+            onCancel();
+        end
+        imgui.CloseCurrentPopup();
+    end
+end
+
+local function QueueConfirmPopup(popupName)
+    imgui.OpenPopup(popupName);
+    confirmPopupOpenAt[popupName] = os.clock();
+end
+
+local function BeginConfirmPopupAnimation(popupName)
+    local openedAt = confirmPopupOpenAt[popupName];
+    if openedAt == nil then
+        return false;
+    end
+
+    local duration = 0.15;
+    local elapsed = os.clock() - openedAt;
+    if elapsed >= duration then
+        confirmPopupOpenAt[popupName] = nil;
+        return false;
+    end
+
+    imgui.PushStyleVar(ImGuiStyleVar_Alpha, imgui.GetStyle().Alpha * (elapsed / duration));
+    return true;
+end
+
+local function EndConfirmPopupAnimation(animated)
+    if animated then
+        imgui.PopStyleVar();
+    end
+end
+
+local function DrawRecoverUIModulePicker()
+    local columns = 3;
+    local itemsPerColumn = math.ceil(#recoverUIModules / columns);
+    local frameHeight = imgui.GetFrameHeight();
+    local itemSpacingY = imgui.GetStyle().ItemSpacing.y;
+    local childPaddingY = 8;
+    local contentHeight = (frameHeight * itemsPerColumn) + (itemSpacingY * (itemsPerColumn - 1));
+    local childHeight = contentHeight + childPaddingY;
+
+    imgui.PushStyleVar(ImGuiStyleVar_WindowPadding, { 8, 4 });
+    imgui.BeginChild('##RecoverUIModules', { RECOVER_UI_PICKER_WIDTH, childHeight }, true);
+    imgui.Columns(columns, '##RecoverUIColumns', false);
+
+    for col = 0, columns - 1 do
+        if col > 0 then
+            imgui.NextColumn();
+        end
+        for row = 1, itemsPerColumn do
+            local index = (col * itemsPerColumn) + row;
+            local module = recoverUIModules[index];
+            if module then
+                imgui.Checkbox(module.label, recoverUISelections[module.name]);
+            end
+        end
+    end
+
+    imgui.Columns(1);
+    imgui.EndChild();
+    imgui.PopStyleVar();
+end
 
 
 -- Build state object for modules that need tab state
@@ -703,10 +843,14 @@ config.DrawWindow = function(us)
             or (lastConfigPosX + lastConfigSizeW) > sw
             or (lastConfigPosY + lastConfigSizeH) > sh;
         if offScreen then
-            imgui.SetNextWindowPos({ 20, 20 }, ImGuiCond_Always);
+            imgui.SetNextWindowPos(persistedWindow.RECOVER_ORIGIN, ImGuiCond_Always);
         end
     end
+    if pendingRecoverPosition then
+        imgui.SetNextWindowPos(persistedWindow.RECOVER_ORIGIN, ImGuiCond_Always);
+    end
     local configVisible = imgui.Begin("XIUI Config - v" .. addon.version, showConfig, bit.bor(ImGuiWindowFlags_NoSavedSettings, ImGuiWindowFlags_NoDocking));
+    pendingRecoverPosition = false;
     if configVisible then
         local windowWidth = imgui.GetContentRegionAvail();
         local sidebarWidth = 180;
@@ -725,6 +869,9 @@ config.DrawWindow = function(us)
         end
         if refreshTexture == nil then
             refreshTexture = LoadTexture('icons/refresh.png');
+        end
+        if recoverUIPositionsTexture == nil then
+            recoverUIPositionsTexture = LoadTexture('icons/recover_ui_position.png');
         end
 
         -- Social icon buttons with square background boxes
@@ -773,10 +920,13 @@ config.DrawWindow = function(us)
         -- Refresh/Reset Button (Using RenderSocialButton for consistent look)
         RenderSocialButton(refreshTexture, "refresh_btn", function()
             showRestoreDefaultsConfirm = true;
-        end, bgLight, bgLighter, borderDark, boxSize, iconSize);
+        end, bgLight, bgLighter, borderDark, boxSize, iconSize, 'Reset current profile settings.');
 
         imgui.SameLine();
-        imgui.ShowHelp('Reset current profile settings.');
+
+        RenderSocialButton(recoverUIPositionsTexture, "recover_ui_btn", function()
+            showRecoverUIPositionsConfirm = true;
+        end, bgLight, bgLighter, borderDark, boxSize, iconSize, 'Moves UI elements to the top-left corner.');
 
         imgui.SameLine();
         imgui.SetCursorPosX(windowWidth - (boxSize * 3) - (boxSpacing * 2));
@@ -833,27 +983,67 @@ config.DrawWindow = function(us)
 
         -- Reset Settings confirmation popup
         if (showRestoreDefaultsConfirm) then
-            imgui.OpenPopup("Confirm Reset Settings");
+            QueueConfirmPopup("Confirm Reset Settings");
             showRestoreDefaultsConfirm = false;
         end
 
         if (imgui.BeginPopupModal("Confirm Reset Settings", true, ImGuiWindowFlags_AlwaysAutoResize)) then
             anyModalOpen = true;
-            imgui.Text("Are you sure you want to reset all settings to defaults?");
-            imgui.Text("This will reset all your customizations including:");
+            local resetPopupAnimated = BeginConfirmPopupAnimation("Confirm Reset Settings");
+            local resetItemSpacing = imgui.GetStyle().ItemSpacing;
+            local resetSectionGap = resetItemSpacing.y * 2;
+            DrawCenteredModalText("This will reset all your customizations including:");
+            imgui.PushStyleVar(ImGuiStyleVar_ItemSpacing, { resetItemSpacing.x, 0 });
+            imgui.Dummy({ 1, resetSectionGap });
+            imgui.PopStyleVar();
             imgui.BulletText("UI positions, scales, and visibility");
             imgui.BulletText("Color settings and themes");
             imgui.BulletText("Font settings");
-            imgui.NewLine();
-
-            if (imgui.Button("Confirm", { 120, 0 })) then
+            imgui.PushStyleVar(ImGuiStyleVar_ItemSpacing, { resetItemSpacing.x, 0 });
+            imgui.Dummy({ 1, resetSectionGap });
+            imgui.PopStyleVar();
+            DrawCenteredModalTextColored("Reset all profile settings back to default?", MODAL_WARNING_TEXT_COLOR);
+            imgui.PushStyleVar(ImGuiStyleVar_ItemSpacing, { resetItemSpacing.x, 0 });
+            imgui.Dummy({ 1, resetSectionGap });
+            imgui.PopStyleVar();
+            DrawCenteredModalButtons(function()
                 ResetSettings();
-                imgui.CloseCurrentPopup();
-            end
-            imgui.SameLine();
-            if (imgui.Button("Cancel", { 120, 0 })) then
-                imgui.CloseCurrentPopup();
-            end
+            end);
+            EndConfirmPopupAnimation(resetPopupAnimated);
+
+            imgui.EndPopup();
+        end
+
+        if (showRecoverUIPositionsConfirm) then
+            ResetRecoverUISelections();
+            QueueConfirmPopup("Confirm Recover UI");
+            showRecoverUIPositionsConfirm = false;
+        end
+
+        if (imgui.BeginPopupModal("Confirm Recover UI", true, ImGuiWindowFlags_AlwaysAutoResize)) then
+            anyModalOpen = true;
+            local recoverPopupAnimated = BeginConfirmPopupAnimation("Confirm Recover UI");
+            DrawCenteredModalText("This only affects positions, not your other settings.");
+            DrawCenteredModalText("Please select the UI element you want to recover:");
+            local recoverPickerGap = imgui.GetStyle().ItemSpacing.y;
+            imgui.PushStyleVar(ImGuiStyleVar_ItemSpacing, { imgui.GetStyle().ItemSpacing.x, 0 });
+            imgui.Dummy({ 0, recoverPickerGap });
+            imgui.PopStyleVar();
+            imgui.SetCursorPosX((imgui.GetWindowWidth() - RECOVER_UI_PICKER_WIDTH) / 2);
+            DrawRecoverUIModulePicker();
+
+            DrawCenteredModalTextColored("Move UI elements to the top-left corner?", MODAL_WARNING_TEXT_COLOR);
+
+            imgui.PushStyleVar(ImGuiStyleVar_ItemSpacing, { imgui.GetStyle().ItemSpacing.x, 0 });
+            imgui.Dummy({ 0, recoverPickerGap * 2 });
+            imgui.PopStyleVar();
+
+            local anySelected = HasRecoverUISelection();
+
+            DrawCenteredModalButtons(function()
+                RecoverSelectedModulePositions(recoverUISelections);
+            end, nil, anySelected);
+            EndConfirmPopupAnimation(recoverPopupAnimated);
 
             imgui.EndPopup();
         end
@@ -1043,6 +1233,12 @@ end
 function config.OpenResetSettingsPopup()
     showConfig[1] = true;
     showRestoreDefaultsConfirm = true;
+end
+
+function config.RecoverWindowPosition()
+    lastConfigPosX = persistedWindow.RECOVER_ORIGIN[1];
+    lastConfigPosY = persistedWindow.RECOVER_ORIGIN[2];
+    pendingRecoverPosition = true;
 end
 
 return config;

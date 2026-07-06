@@ -8,6 +8,7 @@
 
 local imgui        = require('imgui')
 local bit          = require('bit')
+local persistedWindow = require('libs.persisted_window')
 local statusHandler = require('handlers.statushandler')
 
 local ui = {}
@@ -67,7 +68,7 @@ local ICON_UV1        = { 1, 1 }
 local ICON_TINT       = { 1, 1, 1, 1 }
 local ICON_BORDER     = { 0, 0, 0, 0 }
 local PIVOT_CENTER    = { 0.5, 0.5 }
-local BTN_CLOSE       = { -1, 24 }
+local BTN_CLOSE       = { 120, 24 }
 local FONT_SCALE      = 1.2
 local BTN_PROMPT      = { 120, 36 }
 local BTN_YES_COL        = { 0.45, 0.12, 0.10, 1.0 }
@@ -79,6 +80,20 @@ local BTN_NO_COL_ACTIVE  = { 0.25, 0.06, 0.05, 1.0 }
 local COLOR_GOLD_BRIGHT  = { 0.957, 0.855, 0.592, 1.0 }
 local MIN_PARTY_COL_W    = 125
 local WIN_CENTER         = { 0, 0 }
+local PROMPT_POSITION_KEY  = 'ReadyCheck_Prompt'
+local TRACKER_POSITION_KEY = 'ReadyCheck_Tracker'
+local PROMPT_WINDOW_ID     = 'Ready Check##prompt'
+local TRACKER_WINDOW_ID    = 'Ready Check##tracker'
+local SEED_SIZE            = { 220, 100 }
+
+local function prepare_position(positionKey, centerNext)
+    return persistedWindow.PrepareOpen(positionKey, {
+        centerNext = centerNext,
+        centerPos = WIN_CENTER,
+        centerPivot = PIVOT_CENTER,
+        seedSize = SEED_SIZE,
+    });
+end
 
 local function push_window_styles()
     for i = 1, WINDOW_COLOR_COUNT do
@@ -113,13 +128,15 @@ end
 local function render_prompt(state, handlers)
     if not state.prompt_open[1] then return end
 
-    if state.prompt_center_next then
-        imgui.SetNextWindowPos(WIN_CENTER, ImGuiCond_Always, PIVOT_CENTER)
-        state.prompt_center_next = false
+    local centerNext = state.prompt_center_next;
+    local shouldApply = prepare_position(PROMPT_POSITION_KEY, centerNext);
+    if centerNext then
+        state.prompt_center_next = false;
     end
     imgui.SetNextWindowBgAlpha(0.95)
 
-    if imgui.Begin('Ready Check##prompt', state.prompt_open, PROMPT_FLAGS) then
+    if imgui.Begin(PROMPT_WINDOW_ID, state.prompt_open, PROMPT_FLAGS) then
+        persistedWindow.FinishOpen(PROMPT_POSITION_KEY, shouldApply);
         SetWindowFontScale(FONT_SCALE)
         local sender = state.prompt_sender or 'Someone'
         imgui.Spacing()
@@ -177,13 +194,15 @@ end
 local function render_tracker(state, handlers)
     if not state.checker_open[1] then return end
 
-    if state.tracker_center_next then
-        imgui.SetNextWindowPos(WIN_CENTER, ImGuiCond_Always, PIVOT_CENTER)
-        state.tracker_center_next = false
+    local centerNext = state.tracker_center_next;
+    local shouldApply = prepare_position(TRACKER_POSITION_KEY, centerNext);
+    if centerNext then
+        state.tracker_center_next = false;
     end
     imgui.SetNextWindowBgAlpha(0.90)
 
-    if imgui.Begin('Ready Check##tracker', state.checker_open, WINDOW_FLAGS) then
+    if imgui.Begin(TRACKER_WINDOW_ID, state.checker_open, WINDOW_FLAGS) then
+        persistedWindow.FinishOpen(TRACKER_POSITION_KEY, shouldApply);
         SetWindowFontScale(FONT_SCALE)
         imgui.Text('Party / Alliance Status')
         imgui.SameLine()
@@ -262,6 +281,8 @@ local function render_tracker(state, handlers)
         imgui.Separator()
         imgui.Spacing()
 
+        local close_w = imgui.GetContentRegionAvail()
+        imgui.SetCursorPosX((close_w - BTN_CLOSE[1]) * 0.5 + imgui.GetCursorPosX())
         if imgui.Button('Close', BTN_CLOSE) then
             handlers.close_checker()
         end

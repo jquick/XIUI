@@ -13,6 +13,7 @@
 
 local imgui = require('imgui');
 local components = require('config.components');
+local persistedWindow = require('libs.persisted_window');
 
 local M = {};
 
@@ -22,7 +23,10 @@ local COLOR_DESC = { 0.62, 0.64, 0.68, 1.0 };
 local isOpen = { false };
 local commands = {};
 
--- Pull `--@cmd` markers out of a single file into the list.
+local POSITION_KEY = 'XIUI_Commands';
+local WINDOW_ID    = 'XIUI Commands##xiuiHelp';
+local SEED_SIZE    = { 440, 480 };
+
 local function scan_file(path, list)
     local f = io.open(path, 'r');
     if not f then return; end
@@ -36,8 +40,6 @@ local function scan_file(path, list)
     f:close();
 end
 
--- Recursively scan a directory's .lua files (entries without an extension are
--- treated as subdirectories, mirroring how the rest of XIUI walks folders).
 local function scan_dir(dir, list)
     for _, name in ipairs(ashita.fs.get_directory(dir, '.*') or {}) do
         if name:match('%.lua$') then
@@ -48,16 +50,35 @@ local function scan_dir(dir, list)
     end
 end
 
--- Scan the whole addon for markers, returning a sorted { usage, desc } list.
--- Runs only when the window opens, so walking the tree is fine.
+local function isRecoverCommand(usage)
+    return usage:sub(1, 13) == '/xiui recover';
+end
+
 local function collect()
     local list = {};
     scan_dir(string.format('%saddons\\XIUI\\', AshitaCore:GetInstallPath()), list);
-    table.sort(list, function(a, b) return a.usage < b.usage; end);
+    table.sort(list, function(a, b)
+        local aRecover = isRecoverCommand(a.usage);
+        local bRecover = isRecoverCommand(b.usage);
+        if aRecover ~= bRecover then
+            return aRecover;
+        end
+        if aRecover then
+            local aEnable = a.usage:find(' enable', 1, true) ~= nil;
+            local bEnable = b.usage:find(' enable', 1, true) ~= nil;
+            if aEnable ~= bEnable then
+                return aEnable;
+            end
+        end
+        return a.usage < b.usage;
+    end);
     return list;
 end
 
--- Toggle the window; refresh the command list each time it opens.
+function M.IsOpen()
+    return isOpen[1];
+end
+
 function M.Toggle()
     isOpen[1] = not isOpen[1];
     if isOpen[1] then
@@ -65,13 +86,21 @@ function M.Toggle()
     end
 end
 
--- Per-frame render. Cheap no-op while closed.
+function M.RecoverWindowPosition()
+    persistedWindow.RequestRecover(POSITION_KEY);
+end
+
 function M.Draw()
     if not isOpen[1] then return; end
 
-    imgui.SetNextWindowSize({ 440, 480 }, ImGuiCond_FirstUseEver);
+    local shouldApply = persistedWindow.PrepareOpen(POSITION_KEY, {
+        seedSize = SEED_SIZE,
+        defaultSize = SEED_SIZE,
+    });
+
     components.PushWindowStyle();
-    if imgui.Begin('XIUI Commands##xiuiHelp', isOpen, ImGuiWindowFlags_None) then
+    if imgui.Begin(WINDOW_ID, isOpen, ImGuiWindowFlags_None) then
+        persistedWindow.FinishOpen(POSITION_KEY, shouldApply);
         imgui.TextDisabled(string.format('%d commands', #commands));
         imgui.Separator();
         imgui.Spacing();

@@ -64,6 +64,9 @@ function M.createColorCustomizationDefaults()
         -- Enemy List
         enemyList = T{
             hpGradient = T{ enabled = true, start = '#e16c6c', stop = '#fb9494' },
+            castBarGradient = T{ enabled = true, start = '#ffaa00', stop = '#ffcc44' },
+            castTextColor = 0xFFFFAA00,        -- Orange - enemy cast spell name
+            castTargetTextColor = 0xFF66CCFF,  -- Light blue - who the enemy is casting on
             distanceTextColor = 0xFFFFFFFF,
             percentTextColor = 0xFFFFFFFF,
             backgroundColor = 0x66000000,        -- Semi-transparent black - Alpha is the first byte: 0.4 * 255 = 102 = 0x66

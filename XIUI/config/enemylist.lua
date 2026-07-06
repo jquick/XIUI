@@ -19,6 +19,10 @@ function M.DrawSettings()
     if components.CollapsingSection('Display Options##enemyList') then
         components.DrawCheckbox('Show Distance', 'showEnemyDistance');
         components.DrawCheckbox('Show HP% Text', 'showEnemyHPPText');
+        if (not HzLimitedMode) then
+            components.DrawCheckbox('Show Cast Bar', 'showEnemyListCastBar');
+            imgui.ShowHelp('Shows a cast bar under enemies that are casting, with an interrupt flash.');
+        end
         components.DrawCheckbox('Show Enemy Targets', 'showEnemyListTargets');
         imgui.ShowHelp('Shows who each enemy is targeting based on their last action.');
         components.DrawCheckbox('Show Bookends', 'showEnemyListBookends');
@@ -100,11 +104,18 @@ end
 function M.DrawColorSettings()
     if components.CollapsingSection('HP Bar Color##enemyListColor') then
         components.DrawGradientPicker("Enemy HP Bar", gConfig.colorCustomization.enemyList.hpGradient, "Enemy HP bar color");
+        if (not HzLimitedMode) then
+            components.DrawGradientPicker("Enemy Cast Bar", gConfig.colorCustomization.enemyList.castBarGradient, "Enemy cast bar color");
+        end
     end
 
     if components.CollapsingSection('Text Colors##enemyListColor') then
         components.DrawTextColorPicker("Distance Text", gConfig.colorCustomization.enemyList, 'distanceTextColor', "Color of distance text");
         components.DrawTextColorPicker("HP% Text", gConfig.colorCustomization.enemyList, 'percentTextColor', "Color of HP percentage text");
+        if (not HzLimitedMode) then
+            components.DrawTextColorPicker("Cast Text", gConfig.colorCustomization.enemyList, 'castTextColor', "Color of enemy cast spell name");
+            components.DrawTextColorPicker("Cast Target Text", gConfig.colorCustomization.enemyList, 'castTargetTextColor', "Color of the cast target name");
+        end
         components.DrawTextColorPicker("Target Name Text", gConfig.colorCustomization.enemyList, 'targetNameTextColor', "Color of enemy's target name");
         imgui.ShowHelp("Enemy name colors are in the Global section");
     end
