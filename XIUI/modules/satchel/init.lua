@@ -1,6 +1,7 @@
 require('common')
 local imgui = require('imgui')
 local struct = require('struct')
+local persistedWindow = require('libs.persisted_window')
 
 local ui = require('modules.satchel.ui')
 local itemlogic = require('modules.satchel.itemlogic')
@@ -586,7 +587,10 @@ function M.Cleanup()
 end
 
 function M.ResetPositions()
-    -- Position is managed by ImGui window state for the standalone-style satchel window.
+    -- Registry recovery updates windowPositions; move the live window when it is open.
+    if satchel.visible[1] then
+        imgui.SetWindowPos('Satchel', persistedWindow.RECOVER_ORIGIN)
+    end
 end
 
 --@cmd /satchel : Toggle the satchel window

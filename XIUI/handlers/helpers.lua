@@ -78,6 +78,11 @@ function SaveWindowPosition(windowName)
     end
 end
 
+-- Returns true when any part of the rect overlaps the viewport.
+function IsRectVisibleOnScreen(x, y, w, h, margin)
+    return drawingLib.IsRectVisibleOnScreen(x, y, w, h, margin);
+end
+
 -- Entity Constants (from entity.lua)
 SPAWN_FLAG_PLAYER = entityLib.SPAWN_FLAG_PLAYER;
 SPAWN_FLAG_NPC = entityLib.SPAWN_FLAG_NPC;
