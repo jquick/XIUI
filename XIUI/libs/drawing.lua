@@ -109,6 +109,39 @@ function M.draw_circle(center, radius, color, segments, fill, shadowConfig, draw
 end
 
 -- ========================================
+-- Viewport Helpers
+-- ========================================
+
+local function GetViewportSize()
+    local io = imgui.GetIO();
+    return io.DisplaySize.x or 1920, io.DisplaySize.y or 1080;
+end
+
+-- True when any part of the rect overlaps the viewport.
+function M.IsRectVisibleOnScreen(x, y, w, h, margin)
+    margin = margin or 8;
+    if w == nil or h == nil or w <= 0 or h <= 0 then
+        return false;
+    end
+
+    local sw, sh = GetViewportSize();
+    return (x + w) > margin
+       and (y + h) > margin
+       and x < (sw - margin)
+       and y < (sh - margin);
+end
+
+-- Clip a single draw list to the viewport (for modules with many off-screen primitives).
+function M.ClipDrawListToViewport(drawList, fn)
+    if drawList == nil then return; end
+
+    local sw, sh = GetViewportSize();
+    drawList:PushClipRect({0, 0}, {sw, sh}, true);
+    fn();
+    drawList:PopClipRect();
+end
+
+-- ========================================
 -- Draw List Selection
 -- ========================================
 
@@ -122,6 +155,21 @@ function M.GetUIDrawList()
     else
         return imgui.GetForegroundDrawList();
     end
+end
+
+-- Clip both global draw lists to the viewport while fn runs.
+function M.RunWithScreenClip(fn)
+    local sw, sh = GetViewportSize();
+    local clipMin = {0, 0};
+    local clipMax = {sw, sh};
+
+    local bgList = imgui.GetBackgroundDrawList();
+    local fgList = imgui.GetForegroundDrawList();
+    bgList:PushClipRect(clipMin, clipMax, true);
+    fgList:PushClipRect(clipMin, clipMax, true);
+    fn();
+    fgList:PopClipRect();
+    bgList:PopClipRect();
 end
 
 -- ========================================

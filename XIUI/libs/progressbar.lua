@@ -44,6 +44,12 @@ local progressbar = {
 	},
 };
 
+-- Entries evicted during the previous frame. The texture pointer may still be
+-- queued inside an ImGui draw list, so hold the Lua reference until the start
+-- of the next d3d_present (via FlushPendingReleases) before allowing GC to run
+-- d3d8.gc_safe_release on the underlying COM object.
+local pendingReleases = {};
+
 -- Use shared hex2rgba from color library
 local hex2rgba = colorLib.hex2rgba;
 local hex2rgb = colorLib.hex2rgb;
@@ -73,34 +79,40 @@ local function setPos(tbl, x, y)
 	return tbl;
 end
 
--- Evict oldest entries when cache exceeds size limit
--- Uses lastUsed timestamp for LRU-style eviction
+local function deferRelease(entry)
+	if entry ~= nil then
+		pendingReleases[#pendingReleases + 1] = entry;
+	end
+end
+
+-- Evict oldest entries when cache exceeds size limit.
+-- Uses lastUsed timestamp for LRU-style eviction. Only call at frame start
+-- (via ProcessPendingEvictions), never while draw lists are being built.
 local function EvictOldestEntries()
 	local count = #progressbar.gradientTextures;
 	if count <= progressbar.MAX_GRADIENT_CACHE_SIZE then
-		return;  -- No eviction needed
+		return false;
 	end
 
-	-- Sort by lastUsed timestamp (oldest first)
 	table.sort(progressbar.gradientTextures, function(a, b)
 		return (a.lastUsed or 0) < (b.lastUsed or 0);
 	end);
 
-	-- Remove oldest entries
 	local toRemove = math.min(progressbar.EVICTION_COUNT, count - progressbar.MAX_GRADIENT_CACHE_SIZE + progressbar.EVICTION_COUNT);
 	for i = 1, toRemove do
 		local entry = progressbar.gradientTextures[1];
 		if entry then
-			-- Remove from hash table
 			local key = entry.cacheKey;
 			if key then
 				progressbar.gradientTexturesByKey[key] = nil;
 			end
-			-- Remove from array (shift remaining entries)
 			table.remove(progressbar.gradientTextures, 1);
+			deferRelease(entry);
 			progressbar.stats.evictions = progressbar.stats.evictions + 1;
 		end
 	end
+
+	return true;
 end
 
 function MakeGradientBitmap(startColor, endColor)
@@ -199,9 +211,6 @@ function GetGradient(startColor, endColor)
 		progressbar.gradientTexturesByKey[cacheKey] = texture;
 		table.insert(progressbar.gradientTextures, texture);
 		progressbar.stats.totalCreated = progressbar.stats.totalCreated + 1;
-
-		-- Check if we need to evict old entries
-		EvictOldestEntries();
 	end
 
 	if texture == nil or texture.texture == nil then
@@ -252,9 +261,6 @@ function GetThreeStepGradient(startColor, midColor, endColor)
 		progressbar.gradientTexturesByKey[cacheKey] = texture;
 		table.insert(progressbar.gradientTextures, texture);
 		progressbar.stats.totalCreated = progressbar.stats.totalCreated + 1;
-
-		-- Check if we need to evict old entries
-		EvictOldestEntries();
 	end
 
 	if texture == nil or texture.texture == nil then
@@ -629,8 +635,29 @@ end
 -- Cache Management Functions
 -- ============================================
 
+-- Drop Lua references to gradient entries evicted during the previous frame.
+-- Call once per frame from the TOP of d3d_present — by then the prior frame's
+-- ImGui draws have executed, so queued texture pointers are safe to invalidate.
+function progressbar.FlushPendingReleases()
+	if #pendingReleases > 0 then
+		pendingReleases = {};
+	end
+end
+
+-- Evict overflow from the previous frame. Must run after FlushPendingReleases
+-- and before any rendering queues new gradient draws this frame.
+function progressbar.ProcessPendingEvictions()
+	while #progressbar.gradientTextures > progressbar.MAX_GRADIENT_CACHE_SIZE do
+		if not EvictOldestEntries() then
+			break;
+		end
+	end
+end
+
 -- Cleanup all cached textures (call on addon unload)
 function progressbar.Cleanup()
+	pendingReleases = {};
+
 	-- Clear gradient caches
 	progressbar.gradientTexturesByKey = {};
 	progressbar.gradientTextures = {};

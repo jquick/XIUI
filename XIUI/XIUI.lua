@@ -55,6 +55,7 @@ local settingsUpdater = require('core.settings.updater');
 local gameState = require('core.gamestate');
 local uiModules = require('core.moduleregistry');
 local profileManager = require('core.profile_manager');
+local uiRecovery = require('core.ui_recovery');
 
 -- UI modules
 local uiMods = require('modules.init');
@@ -90,6 +91,7 @@ local actionTracker = require('handlers.actiontracker');
 local mobInfo = require('modules.mobinfo.init');
 local statusHandler = require('handlers.statushandler');
 local progressbar = require('libs.progressbar');
+local drawing = require('libs.drawing');
 local diagnostics = require('libs.diagnostics');
 local TextureManager = require('libs.texturemanager');
 local imtext = require('libs.imtext');
@@ -741,25 +743,54 @@ function ResetSettings()
     DeferredUpdateVisuals();
 end
 
-function RecoverAllPositions()
-    if not gConfig.windowPositions then gConfig.windowPositions = {}; end
+uiRecovery.Configure({
+    save = function()
+        profileManager.SaveProfileSettings(config.currentProfile, gConfig);
+        bInternalSave = true;
+        settings.save();
+        if bIsAshita43 then bPendingInternalSaveClear = true; else bInternalSave = false; end
+    end,
+});
 
-    -- Move every known window position to top-left corner
-    for windowName, _ in pairs(gConfig.windowPositions) do
-        gConfig.windowPositions[windowName] = { x = 20, y = 20 };
+function RecoverAllPositions()
+    uiRecovery.RecoverAllModulePositions();
+end
+
+function RecoverSelectedModulePositions(selections)
+    return uiRecovery.RecoverSelectedModulePositions(selections);
+end
+
+local function HandleRecoverCommand(target)
+    if (target == 'enable') then
+        if uiRecovery.ToggleCommands() then
+            print(chat.header(addon.name)
+                :append(chat.message('Recover commands are now: '))
+                :append(chat.success('Enabled')));
+        else
+            print(chat.header(addon.name)
+                :append(chat.message('Recover commands are now: '))
+                :append(chat.error('Disabled')));
+        end
+        return;
     end
 
-    -- Force re-apply on next frame
-    gConfig.appliedPositions = {};
+    if not uiRecovery.IsCommandsEnabled() then
+        print(chat.header(addon.name)
+            :append(chat.error('Command is disabled: Use '))
+            :append(chat.success('/xiui recover enable'))
+            :append(chat.error(' to enable.')));
+        return;
+    end
 
-    -- Clear persisted alignment state so alignBottom doesn't override the restored positions
-    gConfig.partyListState = {};
-
-    -- Save
-    profileManager.SaveProfileSettings(config.currentProfile, gConfig);
-    bInternalSave = true;
-    settings.save();
-    if bIsAshita43 then bPendingInternalSaveClear = true; else bInternalSave = false; end
+    if (target == 'all') then
+        RecoverAllPositions();
+    elseif (target == 'config') then
+        uiRecovery.RecoverConfigWindow();
+    elseif (target and target:any('help', 'commands', 'cmds', '?')) then
+        uiRecovery.RecoverCommandsWindow();
+    elseif (target) then
+        uiRecovery.RecoverModulePositionsByAlias(target);
+    end
 end
 
 function SavePartyListLayoutSetting(key, value)
@@ -989,8 +1020,21 @@ end);
 ]]--
 
 -- Rate-limited error logging for render errors (avoids chat spam)
-local lastPresentErrorTime = 0;
 local PRESENT_ERROR_INTERVAL = 60; -- seconds between error messages
+local presentErrorLastLogged = {
+    present = 0,
+    module = 0,
+    config = 0,
+};
+
+local function LogPresentError(label, err)
+    local key = presentErrorLastLogged[label] and label or 'present';
+    local now = os.time();
+    if now - presentErrorLastLogged[key] >= PRESENT_ERROR_INTERVAL then
+        presentErrorLastLogged[key] = now;
+        print(chat.header(addon.name):append(chat.error(key .. ' render error: ' .. tostring(err))));
+    end
+end
 
 ashita.events.register('d3d_present', 'present_cb', function ()
     if not bInitialized then return; end
@@ -1001,6 +1045,8 @@ ashita.events.register('d3d_present', 'present_cb', function ()
         -- Must run before anything else this frame queues new draws or
         -- triggers another cache clear.
         TextureManager.FlushPendingReleases();
+        progressbar.FlushPendingReleases();
+        progressbar.ProcessPendingEvictions();
 
         -- Process deferred icon cache clears scheduled by macro CRUD last frame.
         -- Must run AFTER FlushPendingReleases (so prior evictions are safe) and
@@ -1051,16 +1097,38 @@ ashita.events.register('d3d_present', 'present_cb', function ()
                 notifications.CheckPendingPoolNotifications();
             end
 
-            -- Render all registered modules
-            for name, _ in pairs(uiModules.GetAll()) do
-                uiModules.RenderModule(name, gConfig, gAdjustedSettings, eventSystemActive, menuOpen);
+            local function tryPresentDraw(label, fn)
+                local ok, drawErr = pcall(fn);
+                if not ok then
+                    LogPresentError(label, drawErr);
+                end
             end
 
-            configMenu.DrawWindow();
-            commandHelp.Draw();
+            local function drawConfigChrome()
+                configMenu.DrawWindow();
+                commandHelp.Draw();
+            end
 
-            -- Render deferred hotbar tooltip after all modules (correct z-order)
-            slotrenderer.FlushTooltip();
+            -- Draw config/help before modules so off-screen module draws cannot
+            -- take down ImGui windows for this frame.
+            local chromeVisible = showConfig[1] or commandHelp.IsOpen();
+            if chromeVisible then
+                tryPresentDraw('config', drawConfigChrome);
+            end
+
+            tryPresentDraw('module', function()
+                drawing.RunWithScreenClip(function()
+                    for name, _ in pairs(uiModules.GetAll()) do
+                        uiModules.RenderModule(name, gConfig, gAdjustedSettings, eventSystemActive, menuOpen);
+                    end
+                end);
+            end);
+
+            if not chromeVisible then
+                tryPresentDraw('config', drawConfigChrome);
+            end
+
+            tryPresentDraw('config', slotrenderer.FlushTooltip);
         else
             uiModules.HideAll();
         end
@@ -1079,11 +1147,7 @@ ashita.events.register('d3d_present', 'present_cb', function ()
     end);
 
     if not ok then
-        local now = os.time();
-        if now - lastPresentErrorTime >= PRESENT_ERROR_INTERVAL then
-            lastPresentErrorTime = now;
-            print(chat.header(addon.name):append(chat.error('Render error: ' .. tostring(err))));
-        end
+        LogPresentError('present', err);
     end
 end);
 
@@ -1512,6 +1576,16 @@ ashita.events.register('command', 'command_cb', function (e)
             return;
         end
 
+        --@cmd /xiui recover enable : Toggle recover commands on/off for this session (required before other recover commands)
+        --@cmd /xiui recover all : Recover all UI module positions to top-left
+        --@cmd /xiui recover <module> : Recover one module (playerbar, partylist, hotbar, ...)
+        --@cmd /xiui recover config : Recover the XIUI Config window position to top-left
+        --@cmd /xiui recover help : Recover the XIUI Commands window position to top-left (aliases: commands, cmds, ?)
+        if (command_args[2] == 'recover') then
+            HandleRecoverCommand(command_args[3]);
+            return;
+        end
+
         -- ============================================
         -- Profile Commands
         -- ============================================
@@ -1520,16 +1594,8 @@ ashita.events.register('command', 'command_cb', function (e)
         --@cmd /xiui profile next : Cycle to next profile
         --@cmd /xiui profile previous : Cycle to previous profile
         --@cmd /xiui profile reset : Open the reset settings popup
-        --@cmd /xiui profile reset positions : Reset all UI positions to center
         --@cmd /xiui profile sync : Sync profiles with disk
         if (command_args[2] == 'profile') then
-            -- /xiui profile reset positions
-            if (command_args[3] == 'reset' and command_args[4] == 'positions') then
-                RecoverAllPositions();
-                print(chat.header(addon.name):append(chat.message('All UI positions recovered to top-left.')));
-                return;
-            end
-
             -- /xiui profile reset
             if (command_args[3] == 'reset') then
                  configMenu.OpenResetSettingsPopup();

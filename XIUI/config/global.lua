@@ -14,9 +14,6 @@ local M = {};
 -- Local state for profile creation/management
 -- (Moved to config.lua)
 
--- Center UI confirmation state
-local showCenterUIConfirm = false;
-
 -- Section: Global Settings (combines General, Font, and Bar settings)
 function M.DrawSettings()
     if components.CollapsingSection('General##global') then
@@ -44,36 +41,6 @@ function M.DrawSettings()
         imgui.ShowHelp('Scales all XIUI elements proportionally. Stacks on top of individual module scale settings. Doesn\'t scale the config window.');
 
         components.DrawCheckbox('Hide During Events', 'hideDuringEvents');
-
-        imgui.Spacing();
-        if imgui.Button('Recover UI Positions') then
-            showCenterUIConfirm = true;
-        end
-        imgui.SameLine();
-        imgui.ShowHelp('Move all UI elements to the top-left corner so they are visible at any resolution.');
-
-        -- Recover UI confirmation popup
-        if showCenterUIConfirm then
-            imgui.OpenPopup("Confirm Recover UI");
-            showCenterUIConfirm = false;
-        end
-
-        if (imgui.BeginPopupModal("Confirm Recover UI", true, ImGuiWindowFlags_AlwaysAutoResize)) then
-            imgui.Text("Move all UI elements to the top-left corner?");
-            imgui.Text("This only affects positions, not your other settings.");
-            imgui.NewLine();
-
-            if (imgui.Button("Confirm", { 120, 0 })) then
-                RecoverAllPositions();
-                imgui.CloseCurrentPopup();
-            end
-            imgui.SameLine();
-            if (imgui.Button("Cancel", { 120, 0 })) then
-                imgui.CloseCurrentPopup();
-            end
-
-            imgui.EndPopup();
-        end
     end
 
     if components.CollapsingSection('Text Settings##global') then
