@@ -4,3 +4,6 @@
 [submodule "XIUI/submodules/xiui-icons"]
 	path = XIUI/submodules/xiui-icons
 	url = https://github.com/Vincerno/xiui-icons.git
+[submodule "XIUI/submodules/mobdb_horizon"]
+	path = XIUI/submodules/mobdb_horizon
+	url = https://github.com/Mr-Sithel/HorizonXI-Dynamis-Mobdb.git
