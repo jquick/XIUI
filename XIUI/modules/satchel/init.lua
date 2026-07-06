@@ -1,34 +1,92 @@
 require('common')
 local imgui = require('imgui')
 local struct = require('struct')
+local ffi = require('ffi')
 local persistedWindow = require('libs.persisted_window')
 
 local ui = require('modules.satchel.ui')
 local itemlogic = require('modules.satchel.itemlogic')
 local containerlogic = require('modules.satchel.containerlogic')
 local icons = require('modules.satchel.icons')
-local footerlogic = require('modules.satchel.footerlogic')
+local TextureManager = require('libs.texturemanager')
 local settingslogic = require('modules.satchel.settings')
 local packetslogic = require('modules.satchel.packets')
-local mogstate = require('modules.satchel.mogstate')
 local contextmenu = require('modules.satchel.contextmenu')
+local slipslogic = require('modules.satchel.slipslogic')
+local altcache = require('modules.satchel.altcache')
+local layoutstate = require('modules.satchel.layoutstate')
+local tooltips = require('modules.satchel.tooltips')
+local satchelfonts = require('modules.satchel.satchelfontcore')
 
 local M = {}
 
 local band = bit.band
 local bor = bit.bor
 
-local WINDOW_COLORS = {
-    { ImGuiCol_WindowBg, { 0.051, 0.051, 0.051, 0.95 } },
-    { ImGuiCol_Border, { 0.3, 0.275, 0.235, 1.0 } },
-    { ImGuiCol_TitleBg, { 0.098, 0.090, 0.075, 1.0 } },
-    { ImGuiCol_TitleBgActive, { 0.137, 0.125, 0.106, 1.0 } },
-}
+local VK_RETURN = 0x0D
+local SCAN_RETURN = 0x1C
+local KEYEVENTF_KEYUP = 0x0002
+local KEYEVENTF_EXTENDEDKEY = 0x0001
+-- Ashita does not deliver Enter to HandleKey while ImGui text input is active.
+-- Arm a short trail from the draw-path poll; after focus drops, HandleKey can
+-- eat key-up/repeats. 400ms covers a realistic commit press.
+local ENTER_BLOCK_TRAIL_SEC = 0.4
+local GIL_ICON_PATH = addon.path .. '..\\satchel\\assets\\gil.png'
 
+pcall(function()
+    ffi.cdef[[
+        short __stdcall GetAsyncKeyState(int vKey);
+        void __stdcall keybd_event(unsigned char bVk, unsigned char bScan, unsigned long dwFlags, unsigned long dwExtraInfo);
+    ]]
+end)
+
+local function is_enter_physically_down()
+    local ok, state = pcall(function()
+        return ffi.C.GetAsyncKeyState(VK_RETURN)
+    end)
+    return ok and state and band(state, 0x8000) ~= 0
+end
+
+-- Both Enter keys map to VK_RETURN; release main and extended scan codes together.
+local function release_enter_keys()
+    pcall(function()
+        ffi.C.keybd_event(VK_RETURN, SCAN_RETURN, KEYEVENTF_KEYUP, 0)
+        ffi.C.keybd_event(
+            VK_RETURN,
+            SCAN_RETURN,
+            bor(KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP),
+            0
+        )
+    end)
+end
+
+local WINDOW_FLAGS = bor(
+    ImGuiWindowFlags_NoResize or 0,
+    ImGuiWindowFlags_NoSavedSettings or 0
+)
+local INVENTORY_CONTAINER = 0
 local FIELD_BAGS = { [0] = true, [5] = true, [6] = true, [7] = true }
 local WINDOW_HOVER_FLAGS = bor(ImGuiHoveredFlags_AllowWhenBlockedByPopup or 0, ImGuiHoveredFlags_AllowWhenBlockedByActiveItem or 0)
-local WINDOW_BASE_FLAGS = bor(ImGuiWindowFlags_NoCollapse or 0, ImGuiWindowFlags_NoMove or 0)
+local DISPLAY_SLOTS = containerlogic.DISPLAY_SLOTS
 local SLOT_CACHE_TTL_SECONDS = 0.15
+
+local function create_drag_bucket()
+    return {
+        active = false,
+        source_slot = nil,
+        source_icon = nil,
+        source_name = '',
+        source_border_color = nil,
+        drop_handled = false,
+        origin_tab = nil,
+        origin_alt_tab = nil,
+        origin_slip_page = nil,
+        alt_entry_key = nil,
+        slip_layout_key = nil,
+        view_tab = nil,
+        window_move_blocked = false,
+    }
+end
 
 local satchel = T{
     initialized = false,
@@ -44,13 +102,9 @@ local satchel = T{
     item_types = {},
     item_sort_keys = {},
     drag = {
-        active = false,
-        source_slot = nil,
-        source_icon = nil,
-        source_name = '',
-    },
-    window_drag = {
-        active = false,
+        main = create_drag_bucket(),
+        alt = create_drag_bucket(),
+        slip = create_drag_bucket(),
     },
     packet_sync = {
         value = nil,
@@ -71,6 +125,11 @@ local satchel = T{
         slot = nil,
         quantity = { 1 },
     },
+    container_used_counts = {},
+    container_sorted = {},
+    display_layouts = {},
+    alt_display_layouts = {},
+    slip_display_layouts = {},
     bazaar_dialog = {
         pending_open = false,
         slot = nil,
@@ -81,17 +140,116 @@ local satchel = T{
         pending_open = false,
         slot = nil,
     },
+    slips_picker = {
+        visible = { false },
+        alt_entry = nil,
+    },
+    slip_view = {
+        visible = { false },
+        slip_id = nil,
+        page = 0,
+        alt_entry = nil,
+    },
+    alt_picker = {
+        visible = { false },
+    },
+    alt_view = {
+        visible = { false },
+        entry = nil,
+        active_tab = nil,
+    },
+    search = {
+        -- Shared by main satchel and the player's storage-slip windows.
+        draft = { '' },
+        active = '',
+        -- Per-alt-character search (bags + that alt's slip picker/content):
+        -- [entry.key] = { draft = { '' }, active = '' }
+        alt = {},
+        -- True while any satchel search field is focused (cleared end-of-frame).
+        input_focused = false,
+        -- Set each frame when a search field reports focus.
+        focus_seen = false,
+        -- Sticky gate: set on focus/commit, cleared only after enter_block_until.
+        consume_enter = false,
+        -- 'shared' or 'alt' — which search Enter/ESC should act on.
+        input_scope = 'shared',
+        input_alt_key = nil,
+        -- os.clock() deadline; Enter stays blocked until this time.
+        enter_block_until = 0,
+        -- Previous-frame Enter key state for poll edge detection.
+        enter_poll_down = false,
+    },
+    window_stack = {},
 }
+
+local footer = {
+    gil_cache = { value = nil, stamp = 0, ttl = 0.5 },
+}
+
+function footer.get_player_gil_amount()
+    local now = os.clock()
+    if footer.gil_cache.value ~= nil and (now - footer.gil_cache.stamp) < footer.gil_cache.ttl then
+        return footer.gil_cache.value
+    end
+
+    local inv = AshitaCore:GetMemoryManager():GetInventory()
+    if not inv then
+        return footer.gil_cache.value
+    end
+
+    local ok, gil_item = pcall(function()
+        return inv:GetContainerItem(0, 0)
+    end)
+    if not ok or not gil_item then
+        return footer.gil_cache.value
+    end
+
+    footer.gil_cache.value = tonumber(gil_item.Count) or 0
+    footer.gil_cache.stamp = now
+    return footer.gil_cache.value
+end
+
+function footer.format_gil_text(n)
+    local s = tostring(math.floor(tonumber(n) or 0))
+    local sign, num = s:match('^([%-]?)(%d+)$')
+    if not num then
+        return s
+    end
+
+    local parts = {}
+    while #num > 3 do
+        table.insert(parts, 1, num:sub(-3))
+        num = num:sub(1, -4)
+    end
+    if #num > 0 then
+        table.insert(parts, 1, num)
+    end
+
+    return (sign or '') .. table.concat(parts, ',')
+end
+
+function footer.load_gil_icon()
+    local tex = icons.load_file_icon(satchel, 'gil', GIL_ICON_PATH)
+    if tex then
+        return tex
+    end
+    return TextureManager.getFileTexture('gil')
+end
+
+function footer.get_gil_icon_ptr(texture)
+    if not texture then
+        return nil
+    end
+    return icons.tex_ptr(texture) or TextureManager.getTexturePtr(texture)
+end
 
 local items = itemlogic.create({
     satchel = satchel,
     imgui = imgui,
-})
-
-local footer = footerlogic.create({
-    satchel = satchel,
-    icons = icons,
-    gil_icon_path = addon.path .. '..\\satchel\\assets\\gil.png',
+    addon_path = addon.path,
+    format_gil_text = footer.format_gil_text,
+    load_gil_icon = footer.load_gil_icon,
+    get_gil_icon_ptr = footer.get_gil_icon_ptr,
 })
 
 local tab_order = containerlogic.tab_order
@@ -108,13 +266,48 @@ local packets = packetslogic.create({
     satchel = satchel,
 })
 
-local mog = mogstate.create({
-    satchel = satchel,
-})
+local function get_mog_state_path()
+    local root = string.format('%s\\config\\addons\\%s\\', AshitaCore:GetInstallPath(), addon.name)
+    local mm = AshitaCore:GetMemoryManager()
+    local party = mm and mm:GetParty()
+    local entity = mm and mm:GetEntity()
+    local index = party and party:GetMemberTargetIndex(0)
+    local name = index and entity and entity:GetName(index)
+    local server_id = index and entity and (tonumber(entity:GetServerId(index)) or 0) or 0
+    if name and #name > 0 and server_id > 0 then
+        return string.format('%s%s_%d\\satchel_mog_state.dat', root, name, server_id),
+            string.format('%s%s_%d\\', root, name, server_id)
+    end
+    return root .. 'defaults\\satchel_mog_state.dat', root .. 'defaults\\'
+end
+
+local function read_mog_state()
+    local path = get_mog_state_path()
+    local f = io.open(path, 'r')
+    if not f then
+        return false
+    end
+    local v = f:read('*a')
+    f:close()
+    return v == '1'
+end
+
+local function set_mog_house(value)
+    satchel.in_mog_house = value == true
+    local path, dir = get_mog_state_path()
+    ashita.fs.create_dir(dir)
+    local f = io.open(path, 'w')
+    if f then
+        f:write(satchel.in_mog_house and '1' or '0')
+        f:close()
+    end
+end
 
 -- Forward-declared so the context menu's "Sort Bag" entry can reuse the same
 -- cooldown/guard logic defined further down.
 local handle_sort_container
+local handle_alt_sort_container
+local handle_slip_sort_container
 
 local menus = contextmenu.create({
     satchel = satchel,
@@ -122,24 +315,210 @@ local menus = contextmenu.create({
     items = items,
     packets = packets,
     on_sort = function(slot)
-        handle_sort_container(slot)
+        if slot and slot.slip_view then
+            handle_slip_sort_container(slot)
+        elseif slot and slot.alt_view then
+            handle_alt_sort_container(slot)
+        else
+            handle_sort_container(slot)
+        end
     end,
 })
 
 local is_module_enabled = settings.is_module_enabled
-local persist_settings = settings.persist_settings
 local read_settings = settings.read_settings
 local sync_display_settings = settings.sync_display_settings
-local toggle_visible = settings.toggle_visible
 local open_xiui_satchel_config = settings.open_xiui_satchel_config
 local show_help = settings.show_help
 local print_disabled_message = settings.print_disabled_message
 
-local function clear_drag_state()
-    satchel.drag.active = false
-    satchel.drag.source_slot = nil
-    satchel.drag.source_icon = nil
-    satchel.drag.source_name = ''
+local function is_horizon_mode()
+    return HzLimitedMode == true
+end
+
+local function normalize_search_text(query)
+    if type(query) ~= 'string' then
+        return ''
+    end
+    return (query:match('^%s*(.-)%s*$') or '')
+end
+
+local function compute_search_chrome(query, slots_by_container, slip_ids, slip_items_fn)
+    local containers = {}
+    local slips = {}
+    local has_slip_matches = false
+    query = normalize_search_text(query)
+    if query == '' then
+        return containers, slips, has_slip_matches
+    end
+
+    for container_id, slots in pairs(slots_by_container or {}) do
+        local cid = tonumber(container_id) or container_id
+        for _, slot in ipairs(slots or {}) do
+            if items.matches_search(slot, query) then
+                containers[cid] = true
+                break
+            end
+        end
+    end
+
+    for _, slip_id in ipairs(slip_ids or {}) do
+        local stored = slip_items_fn and slip_items_fn(slip_id) or {}
+        for _, entry in ipairs(stored) do
+            local item_id = type(entry) == 'table' and (entry.id or entry.Id or entry.item_id) or entry
+            if items.matches_search(item_id, query) then
+                slips[slip_id] = true
+                has_slip_matches = true
+                break
+            end
+        end
+    end
+
+    return containers, slips, has_slip_matches
+end
+
+local function get_active_search()
+    return normalize_search_text(satchel.search.active)
+end
+
+local function get_draft_search()
+    local draft = satchel.search.draft
+    return normalize_search_text(draft and draft[1])
+end
+
+local function arm_enter_block(trail_sec)
+    satchel.search.consume_enter = true
+    local until_t = os.clock() + (trail_sec or ENTER_BLOCK_TRAIL_SEC)
+    if until_t > (satchel.search.enter_block_until or 0) then
+        satchel.search.enter_block_until = until_t
+    end
+end
+
+local function imgui_wants_text_input()
+    local ok, io = pcall(function()
+        return imgui.GetIO()
+    end)
+    return ok and io and io.WantTextInput == true
+end
+
+local function enter_block_active()
+    if satchel.search.input_focused or imgui_wants_text_input() then
+        return true
+    end
+    if not satchel.search.consume_enter then
+        return false
+    end
+    if os.clock() < (satchel.search.enter_block_until or 0) then
+        return true
+    end
+    satchel.search.consume_enter = false
+    return false
+end
+
+local function commit_search()
+    satchel.search.active = get_draft_search()
+    arm_enter_block(ENTER_BLOCK_TRAIL_SEC)
+end
+
+local function clear_search()
+    if satchel.search.draft then
+        satchel.search.draft[1] = ''
+    end
+    satchel.search.active = ''
+end
+
+local function alt_search_key(entry_or_key)
+    if type(entry_or_key) == 'table' then
+        return tostring(entry_or_key.key or entry_or_key.name or 'alt')
+    end
+    return tostring(entry_or_key or 'alt')
+end
+
+local function get_alt_search_state(entry_or_key)
+    local key = alt_search_key(entry_or_key)
+    local by_alt = satchel.search.alt
+    if not by_alt[key] then
+        by_alt[key] = {
+            draft = { '' },
+            active = '',
+        }
+    end
+    return by_alt[key], key
+end
+
+local function get_alt_active_search(entry_or_key)
+    local state = get_alt_search_state(entry_or_key)
+    return normalize_search_text(state.active)
+end
+
+local function get_alt_draft_search(entry_or_key)
+    local state = get_alt_search_state(entry_or_key)
+    return normalize_search_text(state.draft and state.draft[1])
+end
+
+local function get_alt_draft_buffer(entry_or_key)
+    local state = get_alt_search_state(entry_or_key)
+    return state.draft
+end
+
+local function commit_alt_search(entry_or_key)
+    local state = get_alt_search_state(entry_or_key)
+    state.active = get_alt_draft_search(entry_or_key)
+    arm_enter_block(ENTER_BLOCK_TRAIL_SEC)
+end
+
+local function clear_alt_search(entry_or_key)
+    local state = get_alt_search_state(entry_or_key)
+    if state.draft then
+        state.draft[1] = ''
+    end
+    state.active = ''
+end
+
+local function clear_all_alt_searches()
+    satchel.search.alt = {}
+end
+
+local function note_search_input_focused(focused, scope, alt_key)
+    if focused then
+        satchel.search.focus_seen = true
+        satchel.search.input_focused = true
+        satchel.search.input_scope = scope or 'shared'
+        satchel.search.input_alt_key = alt_key
+        -- Refresh the trail while focused so it starts from focus-loss/commit.
+        arm_enter_block(ENTER_BLOCK_TRAIL_SEC)
+    end
+end
+
+local function finish_search_focus_frame()
+    if not satchel.search.focus_seen then
+        satchel.search.input_focused = false
+    end
+    satchel.search.focus_seen = false
+end
+
+local function commit_focused_search()
+    if satchel.search.input_scope == 'alt' and satchel.search.input_alt_key then
+        local key = satchel.search.input_alt_key
+        if get_alt_draft_search(key) ~= '' then
+            commit_alt_search(key)
+        elseif get_alt_active_search(key) ~= '' then
+            clear_alt_search(key)
+            arm_enter_block(ENTER_BLOCK_TRAIL_SEC)
+        end
+    elseif get_draft_search() ~= '' then
+        commit_search()
+    elseif get_active_search() ~= '' then
+        clear_search()
+        arm_enter_block(ENTER_BLOCK_TRAIL_SEC)
+    end
+end
+
+local function annotate_display_indices(slots)
+    for display_index, slot in ipairs(slots or {}) do
+        slot.display_index = display_index - 1
+    end
+    return slots
 end
 
 local function copy_slot_ref(slot)
@@ -151,9 +530,209 @@ local function copy_slot_ref(slot)
         container_id = slot.container_id,
         slot_index = slot.slot_index,
         property_index = slot.property_index,
+        display_index = slot.display_index,
         id = slot.id,
         count = slot.count,
+        read_only = slot.read_only,
+        alt_view = slot.alt_view,
+        slip_view = slot.slip_view,
+        slip_layout_key = slot.slip_layout_key,
     }
+end
+
+local function visual_sort_can_drop_to_slot(drag_state, target_slot, active_container)
+    if not drag_state or not drag_state.active or not drag_state.source_slot or not target_slot then
+        return false
+    end
+
+    if target_slot.locked then
+        return false
+    end
+
+    local source = drag_state.source_slot
+    local source_container = tonumber(source.container_id)
+    local target_container = tonumber(target_slot.container_id)
+    active_container = tonumber(active_container)
+    if source_container == nil or target_container == nil or active_container == nil then
+        return false
+    end
+
+    if source_container ~= target_container or source_container ~= active_container then
+        return false
+    end
+
+    if not source.id or source.id <= 0 then
+        return false
+    end
+
+    local src_display = tonumber(source.display_index)
+    local dst_display = tonumber(target_slot.display_index)
+    if src_display ~= nil and dst_display ~= nil then
+        return src_display ~= dst_display
+    end
+
+    return tonumber(source.slot_index) ~= tonumber(target_slot.slot_index)
+end
+
+local DRAG_SCOPE_MAIN = 'main'
+local DRAG_SCOPE_ALT = 'alt'
+local DRAG_SCOPE_SLIP = 'slip'
+
+local finish_visual_drag_move
+
+local function drag_bucket_for_scope(scope)
+    return satchel.drag[scope]
+end
+
+local function any_drag_active()
+    return satchel.drag.main.active or satchel.drag.alt.active or satchel.drag.slip.active
+end
+
+local function get_active_drag_scope()
+    if satchel.drag.slip.active then
+        return DRAG_SCOPE_SLIP
+    end
+    if satchel.drag.alt.active then
+        return DRAG_SCOPE_ALT
+    end
+    if satchel.drag.main.active then
+        return DRAG_SCOPE_MAIN
+    end
+    return nil
+end
+
+local function slots_match_drag_source(drag_state, slot)
+    if not drag_state or not drag_state.source_slot or not slot then
+        return false
+    end
+
+    if tonumber(drag_state.source_slot.container_id) ~= tonumber(slot.container_id) then
+        return false
+    end
+
+    local source_display = tonumber(drag_state.source_slot.display_index)
+    local slot_display = tonumber(slot.display_index)
+    if source_display ~= nil and slot_display ~= nil then
+        return source_display == slot_display
+    end
+
+    return tonumber(drag_state.source_slot.slot_index) == tonumber(slot.slot_index)
+end
+
+local function is_slot_drag_source(drag_state, slot)
+    if not drag_state or not drag_state.source_slot or not slot then
+        return false
+    end
+
+    -- Only the source bag's cell is the drag origin (same display index in
+    -- another inventory must not light up as the source).
+    if tonumber(drag_state.source_slot.container_id) ~= tonumber(slot.container_id) then
+        return false
+    end
+
+    -- Pin dimming to the display cell where the drag started, not the item's
+    -- memory index (preview swaps would otherwise mark the hover cell as source).
+    local source_display = tonumber(drag_state.source_slot.display_index)
+    local slot_display = tonumber(slot.display_index)
+    if source_display ~= nil and slot_display ~= nil then
+        return source_display == slot_display
+    end
+
+    return tonumber(drag_state.source_slot.slot_index) == tonumber(slot.slot_index)
+end
+
+local function configure_visual_drag_context(grid_ctx, scope, can_drop_fn)
+    local drag_state = drag_bucket_for_scope(scope)
+    grid_ctx.drag_scope = scope
+    grid_ctx.drag_state = drag_state
+    grid_ctx.is_dragging = function()
+        return drag_state.active == true
+    end
+    grid_ctx.is_drag_source = function(slot)
+        if not drag_state.active then
+            return false
+        end
+        return is_slot_drag_source(drag_state, slot)
+    end
+    grid_ctx.can_drop_to_slot = function(target_slot)
+        if not drag_state.active then
+            return false
+        end
+        return can_drop_fn(drag_state, target_slot)
+    end
+end
+
+local function clear_drag_bucket(drag_state, scope)
+    local revert_tab = drag_state.origin_tab
+    local revert_alt_tab = drag_state.origin_alt_tab
+    local revert_slip_page = drag_state.origin_slip_page
+
+    drag_state.active = false
+    drag_state.source_slot = nil
+    drag_state.source_icon = nil
+    drag_state.source_name = ''
+    drag_state.drop_handled = false
+    drag_state.source_border_color = nil
+    drag_state.origin_tab = nil
+    drag_state.alt_entry_key = nil
+    drag_state.origin_alt_tab = nil
+    drag_state.slip_layout_key = nil
+    drag_state.origin_slip_page = nil
+    drag_state.view_tab = nil
+    drag_state.window_move_blocked = false
+
+    if scope == DRAG_SCOPE_MAIN and revert_tab ~= nil then
+        satchel.active_tab = revert_tab
+    elseif scope == DRAG_SCOPE_ALT and revert_alt_tab ~= nil then
+        satchel.alt_view.active_tab = revert_alt_tab
+    elseif scope == DRAG_SCOPE_SLIP and revert_slip_page ~= nil then
+        satchel.slip_view.page = revert_slip_page
+    end
+end
+
+local function clear_drag_state(scope)
+    if scope then
+        clear_drag_bucket(drag_bucket_for_scope(scope), scope)
+        ui.clear_pending_drag(scope)
+        return
+    end
+
+    clear_drag_bucket(satchel.drag.main, DRAG_SCOPE_MAIN)
+    clear_drag_bucket(satchel.drag.alt, DRAG_SCOPE_ALT)
+    clear_drag_bucket(satchel.drag.slip, DRAG_SCOPE_SLIP)
+    ui.clear_pending_drag()
+end
+
+local function sync_chrome_fonts(scale)
+    satchelfonts.sync(scale)
+end
+
+-- startup=true: load-event only (may AddFontFromFileTTF).
+-- startup=false: present-safe; never mutates the font atlas.
+local function sync_all_satchel_fonts(scale, startup)
+    if startup then
+        satchelfonts.prewarm_startup()
+        tooltips.prewarm_startup()
+    end
+    sync_chrome_fonts(scale)
+end
+
+local function begin_chrome_font(scale)
+    return satchelfonts.push_chrome_font(scale)
+end
+
+local function end_chrome_font(pushed)
+    if pushed then
+        satchelfonts.pop_chrome_font()
+    end
+end
+
+local function get_display_tab()
+    local drag_state = satchel.drag.main
+    if drag_state.active and drag_state.view_tab ~= nil then
+        return drag_state.view_tab
+    end
+    return satchel.active_tab
 end
 
 local packet_to_bytes = packets.packet_to_bytes
@@ -161,6 +740,17 @@ local read_u16_le = packets.read_u16_le
 
 local function is_mog_house_context()
     return satchel.in_mog_house == true
+end
+
+local function can_actually_modify_container(container_id)
+    container_id = tonumber(container_id)
+    if container_id == nil then
+        return false
+    end
+    if mog_house_bags[container_id] and not is_mog_house_context() then
+        return false
+    end
+    return true
 end
 
 local function invalidate_slot_cache()
@@ -191,6 +781,11 @@ local function can_drop_slot_to_container(slot, target_container_id, stats)
         return false
     end
 
+    -- Equipped gear and bazaar-listed items cannot leave their bag.
+    if items.is_slot_currently_equipped(slot) or items.is_slot_in_bazaar(slot) then
+        return false
+    end
+
     local source_container = tonumber(slot.container_id)
     local target_container = tonumber(target_container_id)
     if source_container == nil or target_container == nil or source_container == target_container then
@@ -198,6 +793,10 @@ local function can_drop_slot_to_container(slot, target_container_id, stats)
     end
 
     if mog_house_bags[source_container] and not is_mog_house_context() then
+        return false
+    end
+
+    if mog_house_bags[target_container] and not is_mog_house_context() then
         return false
     end
 
@@ -235,15 +834,103 @@ function handle_sort_container(slot)
         return
     end
 
-    if mog_house_bags[container_id] and not is_mog_house_context() then
-        return
+    layoutstate.mark_container_sorted(container_id, satchel.container_sorted)
+    local _, slots_by_container = get_slot_data(false)
+    layoutstate.reset_container_layout(container_id, slots_by_container[container_id], satchel.display_layouts)
+
+    -- Non-Horizon: also ask the server to merge/stack items in this bag.
+    if not is_horizon_mode() then
+        send_sort_packet(container_id)
     end
 
-    send_sort_packet(container_id)
     invalidate_slot_cache()
 end
 
+local function sort_slots_visually(slots)
+    return annotate_display_indices(containerlogic.sort_slots_for_display(
+        slots,
+        function(item_id)
+            return items.get_item_sort_key(item_id)
+        end,
+        function(item_id)
+            return items.get_item_name(item_id) or ''
+        end
+    ))
+end
+
+local function get_alt_visual_slots(entry, container_id)
+    local raw_slots = altcache.build_slots_from_cache(entry, container_id)
+
+    -- Auto Sort: live sorted display only. Keep any custom layout so turning
+    -- auto-sort off restores the previous arrangement.
+    if layoutstate.is_auto_sort_enabled() then
+        return sort_slots_visually(raw_slots)
+    end
+
+    if layoutstate.has_custom_alt_layout(entry.key, container_id, raw_slots, satchel.alt_display_layouts) then
+        return annotate_display_indices(
+            layoutstate.build_alt_display_slots(entry.key, container_id, raw_slots, satchel.alt_display_layouts)
+        )
+    end
+    return annotate_display_indices(raw_slots)
+end
+
+function handle_alt_sort_container(slot)
+    local entry = satchel.alt_view.entry
+    local container_id = slot and tonumber(slot.container_id)
+    if not entry or not container_id then
+        return
+    end
+
+    local raw_slots = altcache.build_slots_from_cache(entry, container_id)
+    local sorted_slots = sort_slots_visually(raw_slots)
+    layoutstate.sync_alt_map_from_visual_slots(entry.key, container_id, sorted_slots, satchel.alt_display_layouts)
+end
+
+local function handle_alt_visual_drop(entry, source, target_slot)
+    if layoutstate.is_auto_sort_enabled() then
+        return
+    end
+
+    local source_container = tonumber(source.container_id)
+    local target_container = tonumber(target_slot.container_id)
+    if not entry or source_container == nil or target_container == nil or source_container ~= target_container then
+        return
+    end
+
+    if source_container ~= tonumber(satchel.alt_view.active_tab) then
+        return
+    end
+
+    local src_display = tonumber(source.display_index)
+    local dst_display = tonumber(target_slot.display_index)
+    if src_display == nil or dst_display == nil or src_display == dst_display then
+        return
+    end
+
+    local raw_slots = altcache.build_slots_from_cache(entry, source_container)
+    if not layoutstate.has_custom_alt_layout(entry.key, source_container, raw_slots, satchel.alt_display_layouts) then
+        local visual_slots = get_alt_visual_slots(entry, source_container)
+        layoutstate.sync_alt_map_from_visual_slots(entry.key, source_container, visual_slots, satchel.alt_display_layouts)
+    end
+
+    if layoutstate.apply_alt_display_move(
+        entry.key,
+        source_container,
+        raw_slots,
+        satchel.alt_display_layouts,
+        src_display,
+        dst_display
+    ) then
+        finish_visual_drag_move(DRAG_SCOPE_ALT)
+    end
+end
+
 local function queue_commands(commands_to_run)
+    if is_horizon_mode() then
+        return
+    end
+
     if not commands_to_run or #commands_to_run == 0 then
         return
     end
@@ -259,13 +946,308 @@ local function queue_commands(commands_to_run)
     end
 end
 
-local function handle_drop_to_container(target_container_id)
-    if not satchel.drag.active or not satchel.drag.source_slot then
+-- Non-Horizon auto-sort: send native 0x3A when auto-sort turns on or a bag's
+-- used count changes, so the server merges stacks. Horizon is visual-only.
+local function tick_auto_sort_server(stats)
+    if is_horizon_mode() or not layoutstate.is_auto_sort_enabled() then
+        satchel.auto_sort_server_sent = nil
         return
     end
 
-    local _, _, stats = get_slot_data(false)
-    if not can_drop_slot_to_container(satchel.drag.source_slot, target_container_id, stats) then
+    satchel.auto_sort_server_sent = satchel.auto_sort_server_sent or {}
+    stats = stats or {}
+
+    for container_id, container_stats in pairs(stats) do
+        container_id = tonumber(container_id)
+        if container_id ~= nil then
+            local used_count = tonumber(container_stats.used) or 0
+            local previous_used = satchel.container_used_counts[container_id]
+            local contents_changed = previous_used ~= nil and used_count ~= previous_used
+            local not_yet_sent = satchel.auto_sort_server_sent[container_id] ~= true
+
+            if not_yet_sent or contents_changed then
+                send_sort_packet(container_id)
+                satchel.auto_sort_server_sent[container_id] = true
+            end
+
+            satchel.container_used_counts[container_id] = used_count
+        end
+    end
+end
+
+local function get_visual_slots_for_container(container_id, slots, stats)
+    layoutstate.ensure_sort_loaded(satchel.container_sorted)
+
+    local container_stats = stats and stats[container_id] or {}
+    local used_count = tonumber(container_stats.used) or 0
+    container_id = tonumber(container_id)
+    if container_id == nil then
+        return slots or {}
+    end
+
+    local previous_used = satchel.container_used_counts[container_id]
+    -- Server auto-sort tick owns used-count updates on non-Horizon; keep a
+    -- local copy here for the manual-sort "new item clears sorted" path.
+    if is_horizon_mode() or not layoutstate.is_auto_sort_enabled() then
+        satchel.container_used_counts[container_id] = used_count
+    end
+
+    local auto_sort = layoutstate.is_auto_sort_enabled()
+
+    if not auto_sort
+        and previous_used ~= nil
+        and used_count > previous_used then
+        layoutstate.clear_container_sorted(container_id, satchel.container_sorted)
+    end
+
+    -- Auto Sort: live sorted display only. Keep any custom layout so turning
+    -- auto-sort off restores the previous arrangement. Server-side stacking is
+    -- handled by tick_auto_sort_server.
+    if auto_sort then
+        return sort_slots_visually(slots)
+    end
+
+    if layoutstate.should_visually_sort(container_id, satchel.container_sorted)
+        and not layoutstate.has_custom_layout(container_id, slots, satchel.display_layouts) then
+        return sort_slots_visually(slots)
+    end
+
+    if layoutstate.uses_manual_layout(container_id, satchel.container_sorted)
+        or layoutstate.has_custom_layout(container_id, slots, satchel.display_layouts) then
+        return annotate_display_indices(
+            layoutstate.build_display_slots(container_id, slots, satchel.display_layouts)
+        )
+    end
+
+    return annotate_display_indices(slots or {})
+end
+
+local function ensure_manual_container_layout(container_id, raw_slots, stats)
+    if not layoutstate.uses_manual_layout(container_id, satchel.container_sorted) then
+        return false
+    end
+
+    if not layoutstate.has_custom_layout(container_id, raw_slots, satchel.display_layouts) then
+        local visual_slots = get_visual_slots_for_container(container_id, raw_slots, stats)
+        layoutstate.sync_map_from_visual_slots(container_id, visual_slots, satchel.display_layouts)
+        layoutstate.clear_container_sorted(container_id, satchel.container_sorted)
+    end
+
+    return true
+end
+
+local function apply_cross_container_visual_placement(target_container_id, target_display_index, raw_slots, stats)
+    if not ensure_manual_container_layout(target_container_id, raw_slots, stats) then
+        return
+    end
+
+    local target_mem = layoutstate.find_first_empty_memory_index(raw_slots)
+    if target_mem == nil then
+        return
+    end
+
+    local dst_display = tonumber(target_display_index)
+    if dst_display == nil then
+        dst_display = layoutstate.find_first_empty_display_index(
+            target_container_id,
+            raw_slots,
+            satchel.display_layouts
+        )
+    end
+    if dst_display == nil then
+        return
+    end
+
+    layoutstate.place_memory_at_display(
+        target_container_id,
+        raw_slots,
+        satchel.display_layouts,
+        target_mem,
+        dst_display
+    )
+end
+
+local function restore_drag_origin_tab()
+    local drag_state = satchel.drag.main
+    if drag_state.origin_tab ~= nil then
+        satchel.active_tab = drag_state.origin_tab
+    end
+end
+
+local function finish_drag_move(commands)
+    if commands and #commands > 0 then
+        queue_commands(commands)
+        invalidate_slot_cache()
+        satchel.drag.main.drop_handled = true
+        restore_drag_origin_tab()
+    end
+    clear_drag_state()
+end
+
+finish_visual_drag_move = function(scope)
+    invalidate_slot_cache()
+    local drag_state = drag_bucket_for_scope(scope)
+    drag_state.drop_handled = true
+    clear_drag_state(scope)
+end
+
+local function handle_main_visual_drop(source, target_slot)
+    local source_container = tonumber(source.container_id)
+    local target_container = tonumber(target_slot.container_id)
+    if source_container == nil or target_container == nil or source_container ~= target_container then
+        return
+    end
+
+    if source_container ~= tonumber(satchel.active_tab) then
+        return
+    end
+
+    local src_display = tonumber(source.display_index)
+    local dst_display = tonumber(target_slot.display_index)
+    if src_display == nil or dst_display == nil or src_display == dst_display then
+        return
+    end
+
+    local _, slots_by_container, stats = get_slot_data(false)
+    local raw_slots = slots_by_container[source_container] or {}
+    if not layoutstate.has_custom_layout(source_container, raw_slots, satchel.display_layouts) then
+        local visual_slots = get_visual_slots_for_container(source_container, raw_slots, stats)
+        layoutstate.sync_map_from_visual_slots(source_container, visual_slots, satchel.display_layouts)
+        layoutstate.clear_container_sorted(source_container, satchel.container_sorted)
+    end
+
+    if layoutstate.apply_display_move(
+        source_container,
+        raw_slots,
+        satchel.display_layouts,
+        src_display,
+        dst_display
+    ) then
+        finish_visual_drag_move(DRAG_SCOPE_MAIN)
+    end
+end
+
+local function get_slip_layout_key(slip_id, alt_entry)
+    local alt_part = alt_entry and tostring(alt_entry.key) or 'player'
+    return ('slip_%s_%d'):format(alt_part, tonumber(slip_id) or 0)
+end
+
+local function get_slip_raw_slots(stored_items, page)
+    local slots, _ = slipslogic.build_page_slots(stored_items, page)
+    local slip_key = get_slip_layout_key(satchel.slip_view.slip_id, satchel.slip_view.alt_entry)
+    for index, slot in ipairs(slots) do
+        slot.slip_view = true
+        slot.slip_layout_key = slip_key
+        slot.container_id = page
+        slot.slot_index = index - 1
+        slot.property_index = index - 1
+    end
+    return slots
+end
+
+local function get_slip_visual_slots(stored_items, page)
+    local slip_key = get_slip_layout_key(satchel.slip_view.slip_id, satchel.slip_view.alt_entry)
+    local raw_slots = get_slip_raw_slots(stored_items, page)
+
+    -- Auto Sort: live sorted display only. Keep any custom layout so turning
+    -- auto-sort off restores the previous arrangement.
+    if layoutstate.is_auto_sort_enabled() then
+        return sort_slots_visually(raw_slots)
+    end
+
+    if layoutstate.has_custom_alt_layout(slip_key, page, raw_slots, satchel.slip_display_layouts) then
+        return annotate_display_indices(
+            layoutstate.build_alt_display_slots(slip_key, page, raw_slots, satchel.slip_display_layouts)
+        )
+    end
+    return annotate_display_indices(raw_slots)
+end
+
+function handle_slip_sort_container(slot)
+    local slip_id = satchel.slip_view.slip_id
+    local page = slot and tonumber(slot.container_id)
+    if not slip_id or page == nil then
+        return
+    end
+
+    local alt_entry = satchel.slip_view.alt_entry
+    local stored_items = alt_entry
+        and slipslogic.get_stored_items_from_cache(alt_entry.slips, slip_id)
+        or slipslogic.get_stored_items(slip_id)
+    local raw_slots = get_slip_raw_slots(stored_items, page)
+    local slip_key = get_slip_layout_key(slip_id, alt_entry)
+    local sorted_slots = sort_slots_visually(raw_slots)
+    layoutstate.sync_alt_map_from_visual_slots(
+        slip_key,
+        page,
+        sorted_slots,
+        satchel.slip_display_layouts,
+        'slip'
+    )
+end
+
+local function handle_slip_visual_drop(source, target_slot)
+    if layoutstate.is_auto_sort_enabled() then
+        return
+    end
+
+    local slip_id = satchel.slip_view.slip_id
+    local page = satchel.slip_view.page
+    if not slip_id or page == nil then
+        return
+    end
+
+    local source_page = tonumber(source.container_id)
+    local target_page = tonumber(target_slot.container_id)
+    if source_page == nil or target_page == nil or source_page ~= target_page or source_page ~= page then
+        return
+    end
+
+    local src_display = tonumber(source.display_index)
+    local dst_display = tonumber(target_slot.display_index)
+    if src_display == nil or dst_display == nil or src_display == dst_display then
+        return
+    end
+
+    local alt_entry = satchel.slip_view.alt_entry
+    local stored_items = alt_entry
+        and slipslogic.get_stored_items_from_cache(alt_entry.slips, slip_id)
+        or slipslogic.get_stored_items(slip_id)
+    local raw_slots = get_slip_raw_slots(stored_items, page)
+    local slip_key = get_slip_layout_key(slip_id, alt_entry)
+
+    if not layoutstate.has_custom_alt_layout(slip_key, page, raw_slots, satchel.slip_display_layouts) then
+        local visual_slots = get_slip_visual_slots(stored_items, page)
+        layoutstate.sync_alt_map_from_visual_slots(
+            slip_key,
+            page,
+            visual_slots,
+            satchel.slip_display_layouts,
+            'slip'
+        )
+    end
+
+    if layoutstate.apply_alt_display_move(
+        slip_key,
+        page,
+        raw_slots,
+        satchel.slip_display_layouts,
+        src_display,
+        dst_display,
+        'slip'
+    ) then
+        finish_visual_drag_move(DRAG_SCOPE_SLIP)
+    end
+end
+
+local function handle_drop_to_container(target_container_id)
+    local drag_state = satchel.drag.main
+    if not drag_state.active or not drag_state.source_slot then
+        return
+    end
+
+    local _, slots_by_container, stats = get_slot_data(false)
+    if not can_drop_slot_to_container(drag_state.source_slot, target_container_id, stats) then
         return
     end
 
@@ -274,20 +1256,148 @@ local function handle_drop_to_container(target_container_id)
         return
     end
 
-    local move_commands = items.build_move_commands(satchel.drag.source_slot, target_container_id, target_slot_index)
-    if move_commands and #move_commands > 0 then
-        queue_commands(move_commands)
-    end
+    local raw_slots = slots_by_container[target_container_id] or {}
+    apply_cross_container_visual_placement(target_container_id, nil, raw_slots, stats)
 
-    clear_drag_state()
+    local move_commands = items.build_move_commands(
+        drag_state.source_slot, target_container_id, target_slot_index)
+    finish_drag_move(move_commands)
 end
 
--- Double-click quick transfer: Inventory sends to Satchel; any other container
--- sends back to Inventory. can_drop_slot_to_container gates inaccessible moves.
-local INVENTORY_CONTAINER = 0
+local function handle_drop_to_slot(scope, target_slot)
+    local drag_state = drag_bucket_for_scope(scope)
+    if not drag_state.active or not drag_state.source_slot or not target_slot then
+        return
+    end
+
+    if target_slot.locked then
+        return
+    end
+
+    local source = drag_state.source_slot
+
+    -- Alt / slip: always visual-only within the same container/page.
+    if scope == DRAG_SCOPE_SLIP and satchel.slip_view.slip_id then
+        if visual_sort_can_drop_to_slot(drag_state, target_slot, satchel.slip_view.page) then
+            handle_slip_visual_drop(source, target_slot)
+        end
+        return
+    end
+
+    if scope == DRAG_SCOPE_ALT and satchel.alt_view.entry then
+        if visual_sort_can_drop_to_slot(drag_state, target_slot, satchel.alt_view.active_tab) then
+            handle_alt_visual_drop(satchel.alt_view.entry, source, target_slot)
+        end
+        return
+    end
+
+    if scope ~= DRAG_SCOPE_MAIN then
+        return
+    end
+
+    -- Horizon: visual-only within the active bag.
+    if is_horizon_mode() then
+        if visual_sort_can_drop_to_slot(drag_state, target_slot, satchel.active_tab) then
+            handle_main_visual_drop(source, target_slot)
+        end
+        return
+    end
+
+    -- Non-Horizon: real item moves (and visual layout within a manual bag).
+    if not items.can_drop_drag_to_slot(source, target_slot, function(target_container)
+        local _, _, stats = get_slot_data(false)
+        return can_drop_slot_to_container(source, target_container, stats)
+    end) then
+        return
+    end
+
+    local source_container = tonumber(source.container_id)
+    local target_container = tonumber(target_slot.container_id)
+    if source_container == nil or target_container == nil then
+        return
+    end
+
+    if source_container == target_container
+        and layoutstate.uses_manual_layout(source_container, satchel.container_sorted) then
+        if items.can_stack_slots(source, target_slot) then
+            if not can_actually_modify_container(source_container) then
+                return
+            end
+            local target_index = items.resolve_drop_target_index(source, target_slot)
+            if not target_index then
+                return
+            end
+            local move_commands = items.build_slot_move_commands(source, target_container, target_index, true)
+            finish_drag_move(move_commands)
+            return
+        end
+
+        local src_display = tonumber(source.display_index)
+        local dst_display = tonumber(target_slot.display_index)
+        if src_display == nil or dst_display == nil or src_display == dst_display then
+            return
+        end
+
+        local _, slots_by_container = get_slot_data(false)
+        local raw_slots = slots_by_container[source_container] or {}
+        if not layoutstate.has_custom_layout(source_container, raw_slots, satchel.display_layouts) then
+            local _, _, stats = get_slot_data(false)
+            local visual_slots = get_visual_slots_for_container(source_container, raw_slots, stats)
+            layoutstate.sync_map_from_visual_slots(source_container, visual_slots, satchel.display_layouts)
+            layoutstate.clear_container_sorted(source_container, satchel.container_sorted)
+        end
+
+        if layoutstate.apply_display_move(
+            source_container,
+            raw_slots,
+            satchel.display_layouts,
+            src_display,
+            dst_display
+        ) then
+            finish_visual_drag_move(DRAG_SCOPE_MAIN)
+        end
+        return
+    end
+
+    if not can_actually_modify_container(source_container)
+        or not can_actually_modify_container(target_container) then
+        return
+    end
+
+    local target_index = items.resolve_drop_target_index(source, target_slot)
+    if not target_index then
+        return
+    end
+
+    local target_occupied = target_slot.id and target_slot.id > 0
+    if source_container ~= target_container and not target_occupied then
+        local _, slots_by_container, stats = get_slot_data(false)
+        local raw_slots = slots_by_container[target_container] or {}
+        apply_cross_container_visual_placement(
+            target_container,
+            tonumber(target_slot.display_index),
+            raw_slots,
+            stats
+        )
+    end
+
+    local move_commands
+    if source_container == target_container then
+        move_commands = items.build_slot_move_commands(source, target_container, target_index, true)
+    else
+        move_commands = items.build_slot_move_commands(source, target_container, target_index, false)
+    end
+
+    finish_drag_move(move_commands)
+end
+
 local SATCHEL_CONTAINER = 5
 
 local function handle_double_click_transfer(slot)
+    if is_horizon_mode() then
+        return
+    end
+
     if not slot or not slot.id or slot.id <= 0 then
         return
     end
@@ -303,8 +1413,7 @@ local function handle_double_click_transfer(slot)
         return
     end
 
-    -- A click also starts a drag; cancel it so the transfer is the only action.
-    clear_drag_state()
+    clear_drag_state(DRAG_SCOPE_MAIN)
 
     local _, _, stats = get_slot_data(false)
     if not can_drop_slot_to_container(slot, target_container_id, stats) then
@@ -319,99 +1428,63 @@ local function handle_double_click_transfer(slot)
     local move_commands = items.build_move_commands(slot, target_container_id, target_slot_index)
     if move_commands and #move_commands > 0 then
         queue_commands(move_commands)
+        invalidate_slot_cache()
     end
 end
 
-local function handle_title_bar_drag()
-    if satchel.drag.active then
-        satchel.window_drag.active = false
-        return
+local function resolve_default_active_tab(display_tabs)
+    if tab_is_available(INVENTORY_CONTAINER, display_tabs) then
+        return INVENTORY_CONTAINER
     end
+    return display_tabs[1]
+end
 
-    local left_button = ImGuiMouseButton_Left
-    local mouse_down = imgui.IsMouseDown(left_button)
-
-    if satchel.window_drag.active then
-        if not mouse_down then
-            satchel.window_drag.active = false
-            return
-        end
-
-        local io = imgui.GetIO()
-        if io and io.MouseDelta then
-            local delta_x = tonumber(io.MouseDelta.x) or 0
-            local delta_y = tonumber(io.MouseDelta.y) or 0
-            if delta_x ~= 0 or delta_y ~= 0 then
-                local win_x, win_y = imgui.GetWindowPos()
-                imgui.SetWindowPos('Satchel', { win_x + delta_x, win_y + delta_y })
-            end
-        end
-        return
+local function get_window_flags_for_scope(scope)
+    local drag_state = drag_bucket_for_scope(scope)
+    if drag_state.active
+        or ui.should_block_satchel_window_move(scope)
+        or drag_state.window_move_blocked then
+        return bor(WINDOW_FLAGS, ImGuiWindowFlags_NoMove)
     end
+    return WINDOW_FLAGS
+end
 
-    if not imgui.IsWindowHovered(WINDOW_HOVER_FLAGS) then
-        return
-    end
-
-    local win_x, win_y = imgui.GetWindowPos()
-    local mouse_x, mouse_y = imgui.GetMousePos()
-    local title_height = (tonumber(imgui.GetFontSize()) or 14) + 12
-    local in_title_bar = (mouse_x >= win_x) and (mouse_y >= win_y) and (mouse_y <= (win_y + title_height))
-    if not in_title_bar then
-        return
-    end
-
-    if imgui.IsMouseClicked(left_button) then
-        satchel.window_drag.active = true
-    end
+local function get_satchel_window_flags()
+    return get_window_flags_for_scope(DRAG_SCOPE_MAIN)
 end
 
 local function render_drag_preview()
-    if not satchel.drag.active then
+    local active_scope = get_active_drag_scope()
+    if not active_scope then
         return
     end
 
-    local label = satchel.drag.source_name or ''
-    if label == '' and satchel.drag.source_slot and satchel.drag.source_slot.id then
-        label = items.get_item_name(satchel.drag.source_slot.id)
-    end
-
-    imgui.BeginTooltip()
-    if satchel.drag.source_icon then
-        imgui.Image(icons.tex_ptr(satchel.drag.source_icon), { 28, 28 })
-        imgui.SameLine(0, 6)
-    end
-    imgui.TextColored({ 0.97, 0.92, 0.72, 1.0 }, label ~= '' and label or 'Dragging item')
-    imgui.EndTooltip()
+    ui.render_drag_ghost(
+        drag_bucket_for_scope(active_scope),
+        icons.tex_ptr,
+        ui.scaled(satchel.settings.slot_size or default_settings.slot_size, ui.get_global_scale())
+    )
 end
 
-local function render_left_tab_column(available_tabs, stats)
-    return ui.render_left_tab_column(available_tabs, satchel.active_tab, function(container_id)
-        return containerlogic.format_tab_label(container_id)
-    end, {
-        is_dragging = satchel.drag.active,
-        can_drop_to_container = function(container_id)
-            if not satchel.drag.source_slot then
-                return false
+local function finalize_drag_frame()
+    render_drag_preview()
+
+    for _, scope in ipairs({ DRAG_SCOPE_MAIN, DRAG_SCOPE_ALT, DRAG_SCOPE_SLIP }) do
+        local drag_state = drag_bucket_for_scope(scope)
+        if drag_state.active then
+            if imgui.IsMouseReleased(0) and not drag_state.drop_handled then
+                clear_drag_state(scope)
             end
-            return can_drop_slot_to_container(satchel.drag.source_slot, container_id, stats)
-        end,
-        on_drop_to_container = function(container_id)
-            handle_drop_to_container(container_id)
-        end,
-        is_container_full = function(container_id)
-            local s = stats[container_id]
-            return s ~= nil and (s.total or 0) > 0 and (s.used or 0) >= s.total
-        end,
-    })
+        else
+            drag_state.drop_handled = false
+        end
+    end
 end
 
-local set_mog_house = mog.set_mog_house
-local read_mog_state = mog.read_mog_state
 local render_context_menu = menus.render
 
-local function render_slot_grid(slots, key_prefix, stat)
-    ui.render_slot_grid(slots, key_prefix, stat, {
+local function build_grid_context(include_gil)
+    local grid_ctx = {
         settings = satchel.settings,
         default_slot_size = default_settings.slot_size,
         get_item_sort_key = items.get_item_sort_key,
@@ -422,35 +1495,910 @@ local function render_slot_grid(slots, key_prefix, stat)
         tex_ptr = icons.tex_ptr,
         get_slot_border_color = items.get_slot_border_color,
         render_item_detail_tooltip = items.render_item_detail_tooltip,
-        on_slot_right_click = function(slot)
-            -- Horizon forbids addon-driven item moves, so the satchel is view-only there.
-            if HzLimitedMode then return end
-            satchel.context_menu.slot = copy_slot_ref(slot)
-            satchel.context_menu.pending_open = true
-        end,
-        on_slot_double_click = function(slot)
-            if HzLimitedMode then return end
-            handle_double_click_transfer(copy_slot_ref(slot))
-        end,
-        on_slot_drag_start = function(slot, icon_texture)
-            if HzLimitedMode then return end
-            if satchel.drag.active then
+        item_matches_search = items.matches_search,
+        search_query = get_active_search(),
+        scale = ui.get_global_scale(),
+        hide_gil = not include_gil,
+    }
+
+    if include_gil then
+        grid_ctx.get_gil_amount = footer.get_player_gil_amount
+        grid_ctx.format_gil_text = footer.format_gil_text
+        grid_ctx.load_gil_icon = footer.load_gil_icon
+        grid_ctx.get_gil_icon_ptr = footer.get_gil_icon_ptr
+    end
+
+    configure_visual_drag_context(grid_ctx, DRAG_SCOPE_MAIN, function(drag_state, target_slot)
+        if target_slot.alt_view or target_slot.slip_view then
+            return false
+        end
+
+        if is_horizon_mode() then
+            return visual_sort_can_drop_to_slot(drag_state, target_slot, satchel.active_tab)
+        end
+
+        if not drag_state.active or not drag_state.source_slot then
+            return false
+        end
+
+        local source = drag_state.source_slot
+        if not items.can_drop_drag_to_slot(source, target_slot, function(target_container)
+            local _, _, stats = get_slot_data(false)
+            return can_drop_slot_to_container(source, target_container, stats)
+        end) then
+            return false
+        end
+
+        local source_container = tonumber(source.container_id)
+        local target_container = tonumber(target_slot.container_id)
+        if source_container == nil or target_container == nil then
+            return false
+        end
+
+        if source_container == target_container
+            and layoutstate.uses_manual_layout(source_container, satchel.container_sorted)
+            and not items.can_stack_slots(source, target_slot) then
+            return true
+        end
+
+        return can_actually_modify_container(source_container)
+            and can_actually_modify_container(target_container)
+    end)
+    grid_ctx.on_drop_to_slot = function(target_slot)
+        handle_drop_to_slot(DRAG_SCOPE_MAIN, target_slot)
+    end
+    grid_ctx.on_slot_right_click = function(slot)
+        if slot.locked then
+            return
+        end
+        satchel.context_menu.slot = copy_slot_ref(slot)
+        satchel.context_menu.pending_open = true
+    end
+    grid_ctx.on_slot_double_click = function(slot)
+        if is_horizon_mode() or slot.read_only or slot.locked then
+            return
+        end
+        handle_double_click_transfer(copy_slot_ref(slot))
+    end
+    grid_ctx.on_slot_drag_start = function(slot, icon_texture)
+        local drag_state = satchel.drag.main
+        if slot.locked or (any_drag_active() and not drag_state.active) or not slot.id or slot.id <= 0 then
+            return
+        end
+
+        if is_horizon_mode() then
+            local slot_container = tonumber(slot.container_id)
+            local active_container = tonumber(satchel.active_tab)
+            if slot_container == nil or active_container == nil or slot_container ~= active_container then
                 return
             end
+        end
 
-            if mog_house_bags[tonumber(slot.container_id)] and not is_mog_house_context() then
-                return
+        drag_state.active = true
+        drag_state.source_slot = copy_slot_ref(slot)
+        local live_index = items.resolve_move_source_index(slot)
+        if live_index then
+            drag_state.source_slot.property_index = live_index
+        end
+        drag_state.source_icon = icon_texture
+        drag_state.source_name = items.get_item_name(slot.id) or ''
+        drag_state.source_border_color = items.get_slot_border_color(slot)
+        drag_state.origin_tab = satchel.active_tab
+        drag_state.view_tab = satchel.active_tab
+    end
+
+    return grid_ctx
+end
+
+local function build_slip_grid_context()
+    local grid_ctx = build_grid_context(false)
+    grid_ctx.read_only = true
+    grid_ctx.visual_sort_only = true
+    configure_visual_drag_context(grid_ctx, DRAG_SCOPE_SLIP, function(drag_state, target_slot)
+        if target_slot.slip_view ~= true then
+            return false
+        end
+        if drag_state.slip_layout_key
+            and target_slot.slip_layout_key ~= drag_state.slip_layout_key then
+            return false
+        end
+        return visual_sort_can_drop_to_slot(drag_state, target_slot, satchel.slip_view.page)
+    end)
+    grid_ctx.on_drop_to_slot = function(target_slot)
+        handle_drop_to_slot(DRAG_SCOPE_SLIP, target_slot)
+    end
+    grid_ctx.on_slot_right_click = function(slot)
+        if slot.locked then
+            return
+        end
+        satchel.context_menu.slot = copy_slot_ref(slot)
+        satchel.context_menu.pending_open = true
+    end
+    grid_ctx.on_slot_double_click = function(_slot)
+        return
+    end
+    grid_ctx.on_slot_drag_start = function(slot, icon_texture)
+        local drag_state = satchel.drag.slip
+        if slot.locked or (any_drag_active() and not drag_state.active) or not slot.id or slot.id <= 0 then
+            return
+        end
+
+        local slot_page = tonumber(slot.container_id)
+        local active_page = tonumber(satchel.slip_view.page)
+        if slot_page == nil or active_page == nil or slot_page ~= active_page then
+            return
+        end
+
+        drag_state.active = true
+        drag_state.slip_layout_key = slot.slip_layout_key
+        drag_state.source_slot = copy_slot_ref(slot)
+        drag_state.source_icon = icon_texture
+        drag_state.source_name = items.get_item_name(slot.id) or ''
+        drag_state.source_border_color = items.get_slot_border_color(slot)
+        drag_state.origin_slip_page = satchel.slip_view.page
+    end
+
+    return grid_ctx
+end
+
+local function build_alt_grid_context(entry)
+    local grid_ctx = build_grid_context(false)
+    grid_ctx.search_query = get_alt_active_search(entry)
+    grid_ctx.read_only = true
+    grid_ctx.visual_sort_only = true
+    configure_visual_drag_context(grid_ctx, DRAG_SCOPE_ALT, function(drag_state, target_slot)
+        if target_slot.alt_view ~= true then
+            return false
+        end
+        return visual_sort_can_drop_to_slot(drag_state, target_slot, satchel.alt_view.active_tab)
+    end)
+    grid_ctx.on_drop_to_slot = function(target_slot)
+        handle_drop_to_slot(DRAG_SCOPE_ALT, target_slot)
+    end
+    grid_ctx.on_slot_right_click = function(slot)
+        if slot.locked then
+            return
+        end
+        satchel.context_menu.slot = copy_slot_ref(slot)
+        satchel.context_menu.pending_open = true
+    end
+    grid_ctx.on_slot_double_click = function(_slot)
+        return
+    end
+    grid_ctx.on_slot_drag_start = function(slot, icon_texture)
+        local drag_state = satchel.drag.alt
+        if slot.locked or (any_drag_active() and not drag_state.active) or not slot.id or slot.id <= 0 then
+            return
+        end
+
+        local slot_container = tonumber(slot.container_id)
+        local active_container = tonumber(satchel.alt_view.active_tab)
+        if slot_container == nil or active_container == nil or slot_container ~= active_container then
+            return
+        end
+
+        drag_state.active = true
+        drag_state.alt_entry_key = entry and entry.key or nil
+        drag_state.source_slot = copy_slot_ref(slot)
+        drag_state.source_icon = icon_texture
+        drag_state.source_name = items.get_item_name(slot.id) or ''
+        drag_state.source_border_color = items.get_slot_border_color(slot)
+        drag_state.origin_alt_tab = satchel.alt_view.active_tab
+    end
+
+    return grid_ctx
+end
+
+local function apply_cached_gil_display(grid_ctx, gil_amount)
+    if gil_amount == nil then
+        return
+    end
+
+    grid_ctx.hide_gil = false
+    grid_ctx.get_gil_amount = function()
+        return gil_amount
+    end
+    grid_ctx.format_gil_text = footer.format_gil_text
+    grid_ctx.load_gil_icon = footer.load_gil_icon
+    grid_ctx.get_gil_icon_ptr = footer.get_gil_icon_ptr
+end
+
+local function ensure_active_tab(active_tab, available_tabs)
+    for _, container_id in ipairs(available_tabs) do
+        if container_id == active_tab then
+            return active_tab
+        end
+    end
+    return available_tabs[1]
+end
+
+local function render_slot_grid(slots, key_prefix, stat)
+    local grid_ctx = build_grid_context(true)
+    ui.render_slot_grid(slots, key_prefix, stat, grid_ctx)
+end
+
+local function format_slip_button_label(slip_id)
+    return ('%s##slip_pick_%d'):format(slipslogic.format_slip_label(slip_id), slip_id)
+end
+
+local function get_slip_picker_ids(alt_entry)
+    if alt_entry then
+        return slipslogic.get_cached_slip_ids(alt_entry.slips)
+    end
+    return slipslogic.get_owned_slip_ids()
+end
+
+local function close_all_satchel_windows()
+    satchel.visible[1] = false
+    satchel.last_visible = false
+    satchel.settings.visible = false
+    satchel.slips_picker.visible[1] = false
+    satchel.slips_picker.alt_entry = nil
+    satchel.slip_view.visible[1] = false
+    satchel.slip_view.slip_id = nil
+    satchel.slip_view.page = 0
+    satchel.slip_view.alt_entry = nil
+    satchel.alt_picker.visible[1] = false
+    satchel.alt_view.visible[1] = false
+    satchel.alt_view.entry = nil
+    satchel.alt_view.active_tab = nil
+    satchel.window_stack = {}
+    clear_search()
+    clear_all_alt_searches()
+    clear_drag_state()
+end
+
+local function register_window_open(window_key)
+    for i = #satchel.window_stack, 1, -1 do
+        if satchel.window_stack[i] == window_key then
+            table.remove(satchel.window_stack, i)
+        end
+    end
+    satchel.window_stack[#satchel.window_stack + 1] = window_key
+end
+
+local function open_main_satchel()
+    clear_search()
+    satchel.active_tab = INVENTORY_CONTAINER
+    satchel.visible[1] = true
+    satchel.last_visible = true
+    satchel.settings.visible = true
+    register_window_open('main')
+end
+
+local function is_satchel_window_visible(window_key)
+    if window_key == 'main' then
+        return satchel.visible[1] == true
+    elseif window_key == 'slips_picker' then
+        return satchel.slips_picker.visible[1] == true
+    elseif window_key == 'slip_view' then
+        return satchel.slip_view.visible[1] == true
+    elseif window_key == 'alt_picker' then
+        return satchel.alt_picker.visible[1] == true
+    elseif window_key == 'alt_view' then
+        return satchel.alt_view.visible[1] == true
+    end
+    return false
+end
+
+local function alt_entry_for_window(window_key)
+    if window_key == 'alt_view' then
+        return satchel.alt_view.entry
+    elseif window_key == 'slip_view' then
+        return satchel.slip_view.alt_entry
+    elseif window_key == 'slips_picker' then
+        return satchel.slips_picker.alt_entry
+    end
+    return nil
+end
+
+-- Clears search for the topmost window that has draft/active text.
+-- Returns true when ESC should be consumed without closing a window.
+local function try_clear_search()
+    for i = #satchel.window_stack, 1, -1 do
+        local window_key = satchel.window_stack[i]
+        if is_satchel_window_visible(window_key) then
+            local alt_entry = alt_entry_for_window(window_key)
+            if alt_entry then
+                local alt_key = alt_search_key(alt_entry)
+                if get_alt_active_search(alt_key) ~= '' or get_alt_draft_search(alt_key) ~= '' then
+                    clear_alt_search(alt_key)
+                    return true
+                end
+                return false
             end
 
-            satchel.drag.active = true
-            satchel.drag.source_slot = copy_slot_ref(slot)
-            satchel.drag.source_icon = icon_texture
-            satchel.drag.source_name = items.get_item_name(slot.id) or ''
-        end,
-        get_gil_amount = footer.get_player_gil_amount,
-        format_gil_text = footer.format_gil_text,
-        load_gil_icon = footer.load_gil_icon,
-    })
+            if window_key == 'main' or window_key == 'slip_view' or window_key == 'slips_picker' then
+                if get_active_search() ~= '' or get_draft_search() ~= '' then
+                    clear_search()
+                    return true
+                end
+                return false
+            end
+
+            return false
+        end
+    end
+
+    if is_satchel_window_visible('main')
+        and (get_active_search() ~= '' or get_draft_search() ~= '') then
+        clear_search()
+        return true
+    end
+
+    return false
+end
+
+local function any_satchel_window_visible()
+    return is_satchel_window_visible('main')
+        or is_satchel_window_visible('slips_picker')
+        or is_satchel_window_visible('slip_view')
+        or is_satchel_window_visible('alt_picker')
+        or is_satchel_window_visible('alt_view')
+end
+
+-- Poll Enter while satchel is open. ImGui text focus swallows Ashita key events, so
+-- the draw path arms the post-commit trail and cancels the game-side key-down.
+local function tick_search_enter_guard()
+    if not any_satchel_window_visible() then
+        satchel.search.enter_poll_down = false
+        return
+    end
+
+    local down = is_enter_physically_down()
+    local was_down = satchel.search.enter_poll_down == true
+    local in_search = satchel.search.input_focused == true
+
+    if down and (in_search or satchel.search.consume_enter) then
+        arm_enter_block(ENTER_BLOCK_TRAIL_SEC)
+        -- Cancel game-side Enter holds; ImGui may not deliver these to HandleKey.
+        release_enter_keys()
+    elseif not down and was_down and satchel.search.consume_enter then
+        arm_enter_block(ENTER_BLOCK_TRAIL_SEC)
+    end
+
+    satchel.search.enter_poll_down = down
+end
+
+local function toggle_satchel_command()
+    if any_satchel_window_visible() then
+        close_all_satchel_windows()
+    else
+        open_main_satchel()
+    end
+end
+
+local function close_satchel_window(window_key)
+    if window_key == 'main' then
+        satchel.visible[1] = false
+        satchel.last_visible = false
+        satchel.settings.visible = false
+        clear_search()
+    elseif window_key == 'slips_picker' then
+        satchel.slips_picker.visible[1] = false
+        satchel.slips_picker.alt_entry = nil
+    elseif window_key == 'slip_view' then
+        satchel.slip_view.visible[1] = false
+        satchel.slip_view.slip_id = nil
+        satchel.slip_view.alt_entry = nil
+    elseif window_key == 'alt_picker' then
+        satchel.alt_picker.visible[1] = false
+    elseif window_key == 'alt_view' then
+        if satchel.alt_view.entry then
+            clear_alt_search(satchel.alt_view.entry)
+        end
+        satchel.alt_view.visible[1] = false
+        satchel.alt_view.entry = nil
+        satchel.alt_view.active_tab = nil
+    end
+end
+
+local function close_top_satchel_window()
+    for i = #satchel.window_stack, 1, -1 do
+        local window_key = satchel.window_stack[i]
+        if is_satchel_window_visible(window_key) then
+            close_satchel_window(window_key)
+            table.remove(satchel.window_stack, i)
+            return true
+        end
+        table.remove(satchel.window_stack, i)
+    end
+
+    if is_satchel_window_visible('main') then
+        close_satchel_window('main')
+        return true
+    end
+
+    return false
+end
+
+local function open_alt_picker()
+    satchel.alt_picker.visible[1] = true
+    register_window_open('alt_picker')
+end
+
+local function open_slips_picker(alt_entry)
+    satchel.slips_picker.alt_entry = alt_entry
+    satchel.slips_picker.visible[1] = true
+    register_window_open('slips_picker')
+end
+
+local function open_slip_view(slip_id, alt_entry)
+    satchel.slip_view.slip_id = slip_id
+    satchel.slip_view.page = 0
+    satchel.slip_view.alt_entry = alt_entry
+    satchel.slip_view.visible[1] = true
+    close_satchel_window('slips_picker')
+    register_window_open('slip_view')
+end
+
+local function open_alt_view(entry)
+    satchel.alt_view.entry = entry
+    satchel.alt_view.active_tab = 0
+    satchel.alt_view.visible[1] = true
+    close_satchel_window('alt_picker')
+    register_window_open('alt_view')
+end
+
+local function compute_content_window_size(scale, toolbar_h, toolbar_opts, tab_count)
+    local metrics = ui.compute_grid_metrics(satchel.settings, DISPLAY_SLOTS, scale, { layout_size = true })
+    local needs_tab_sb = ui.tab_sidebar_needs_scrollbar(tab_count, metrics.grid_height, scale)
+    local tab_width = ui.get_tab_sidebar_width(scale, needs_tab_sb)
+    local footer_h = ui.get_footer_row_height(scale)
+    local toolbar_height = toolbar_h or ui.scaled(34, scale)
+    local spacing_h = ui.scaled(8, scale)
+    local chrome_h = ui.get_title_bar_height(scale) + ui.scaled(16, scale)
+    local sidebar_gap = ui.scaled(8, scale)
+    -- Extra width so right-edge slot chrome (search ants) is not clipped.
+    local pad_x = ui.scaled(24, scale) + ui.scaled(4, scale)
+    local win_w = tab_width + sidebar_gap + metrics.grid_width + metrics.scrollbar_w + pad_x
+    local win_h = chrome_h + toolbar_height + spacing_h + metrics.grid_height + footer_h
+
+    toolbar_opts = toolbar_opts or {}
+    if toolbar_opts.enabled then
+        local gap = ui.scaled(8, scale)
+        local buttons_w = 0
+        if toolbar_opts.show_alt_button then
+            buttons_w = buttons_w + ui.scaled(132, scale)
+        end
+        if toolbar_opts.show_slips_button then
+            buttons_w = buttons_w + (buttons_w > 0 and gap or 0) + ui.scaled(128, scale)
+        end
+        local toolbar_min_w = buttons_w + (buttons_w > 0 and gap or 0) + ui.scaled(120, scale)
+        win_w = math.max(win_w, toolbar_min_w + pad_x)
+    end
+
+    return win_w, win_h, metrics, tab_width
+end
+
+local function compute_main_window_size(scale, show_slips_button, tab_count)
+    return compute_content_window_size(scale, ui.scaled(34, scale), {
+        enabled = true,
+        show_alt_button = true,
+        show_slips_button = show_slips_button == true,
+    }, tab_count)
+end
+
+local TEMPORARY_CONTAINER = 3
+
+local function has_temporary_items(stats)
+    local temporary_stats = stats and stats[TEMPORARY_CONTAINER]
+    return temporary_stats ~= nil and (temporary_stats.used or 0) > 0
+end
+
+local function build_display_tabs(stats)
+    local display_tabs = {}
+    if has_temporary_items(stats) then
+        display_tabs[#display_tabs + 1] = TEMPORARY_CONTAINER
+    end
+    for _, container_id in ipairs(tab_order) do
+        if container_id ~= TEMPORARY_CONTAINER and containerlogic.is_tab_available(container_id, stats) then
+            display_tabs[#display_tabs + 1] = container_id
+        end
+    end
+    return display_tabs
+end
+
+local function tab_is_available(container_id, available_tabs)
+    for _, tab_id in ipairs(available_tabs) do
+        if tab_id == container_id then
+            return true
+        end
+    end
+    return false
+end
+
+local PICKER_MIN_VISIBLE_ROWS = 8
+
+local function compute_picker_window_height(item_count, scale, extra)
+    local button_h = ui.scaled(24, scale) + ui.scaled(2, scale)
+    return ui.scaled(extra or 48, scale) + (item_count * button_h)
+end
+
+local function get_picker_window_height(item_count, scale)
+    local row_count = math.max(PICKER_MIN_VISIBLE_ROWS, math.max(1, item_count))
+    return compute_picker_window_height(row_count, scale, 48)
+end
+
+local function draw_slips_picker_window(scale)
+    if not satchel.slips_picker.visible[1] then
+        return
+    end
+
+    local alt_entry = satchel.slips_picker.alt_entry
+    local owned_slip_ids = get_slip_picker_ids(alt_entry)
+    local chrome_query = alt_entry and get_alt_active_search(alt_entry) or get_active_search()
+    local _, slips_with_matches = compute_search_chrome(
+        chrome_query,
+        nil,
+        owned_slip_ids,
+        function(slip_id)
+            if alt_entry then
+                return slipslogic.get_stored_items_from_cache(alt_entry.slips, slip_id)
+            end
+            return slipslogic.get_stored_items(slip_id)
+        end
+    )
+
+    ui.push_config_window_style()
+    local picker_w = ui.scaled(220, scale)
+    local picker_h = get_picker_window_height(math.max(1, #owned_slip_ids), scale)
+    ui.set_window_size(picker_w, picker_h)
+
+    local title = alt_entry and ('Storage Slips: %s'):format(alt_entry.name or 'Alt') or 'Satchel Storage Slips'
+    local began = imgui.Begin(title, satchel.slips_picker.visible, WINDOW_FLAGS)
+    if began then
+        local chrome_pushed = begin_chrome_font(scale)
+        ui.render_slip_picker(
+            owned_slip_ids,
+            function(slip_id)
+                open_slip_view(slip_id, alt_entry)
+            end,
+            scale,
+            format_slip_button_label,
+            slips_with_matches,
+            chrome_query ~= '',
+            any_drag_active()
+        )
+        end_chrome_font(chrome_pushed)
+    end
+    imgui.End()
+
+    if not satchel.slips_picker.visible[1] then
+        satchel.slips_picker.alt_entry = nil
+    end
+    ui.pop_config_window_style()
+end
+
+local function compute_slip_window_size(scale)
+    local metrics = ui.compute_grid_metrics(satchel.settings, slipslogic.PAGE_SIZE, scale, { layout_size = true })
+    local toolbar_h = ui.scaled(34, scale)
+    local spacing_h = ui.scaled(8, scale)
+    local footer_h = ui.get_footer_row_height(scale)
+    local pad_x = ui.scaled(24, scale)
+    local chrome_h = ui.get_title_bar_height(scale) + ui.scaled(16, scale)
+    -- Slight extra width so right-edge search ants are not clipped.
+    local win_w = metrics.grid_width + metrics.scrollbar_w + (pad_x * 2) + ui.scaled(4, scale)
+    local win_h = chrome_h + toolbar_h + spacing_h + metrics.grid_height + footer_h
+    return win_w, win_h, metrics, footer_h
+end
+
+local function draw_slip_content_window(scale)
+    if not satchel.slip_view.visible[1] or not satchel.slip_view.slip_id then
+        return
+    end
+
+    local slip_id = satchel.slip_view.slip_id
+    local alt_entry = satchel.slip_view.alt_entry
+    local stored_items = alt_entry
+        and slipslogic.get_stored_items_from_cache(alt_entry.slips, slip_id)
+        or slipslogic.get_stored_items(slip_id)
+    local page_count = math.max(1, math.ceil(#stored_items / slipslogic.PAGE_SIZE))
+    if satchel.slip_view.page >= page_count then
+        satchel.slip_view.page = math.max(0, page_count - 1)
+    end
+
+    local page = satchel.slip_view.page
+    local slots = get_slip_visual_slots(stored_items, page)
+    local title = slipslogic.format_slip_label(slip_id)
+    if alt_entry and alt_entry.name then
+        title = ('%s - %s'):format(alt_entry.name, title)
+    end
+    local win_w, win_h, metrics, footer_h = compute_slip_window_size(scale)
+
+    ui.push_config_window_style()
+    ui.set_window_size(win_w, win_h)
+
+    local began = imgui.Begin(title, satchel.slip_view.visible, bor(
+        get_window_flags_for_scope(DRAG_SCOPE_SLIP),
+        ImGuiWindowFlags_NoScrollbar or 0
+    ))
+    if began then
+        local chrome_pushed = begin_chrome_font(scale)
+        local alt_key = alt_entry and alt_search_key(alt_entry) or nil
+        local active_search = alt_key and get_alt_active_search(alt_key) or get_active_search()
+        local draft_buffer = alt_key and get_alt_draft_buffer(alt_key) or satchel.search.draft
+        local slip_toolbar_clicks, slip_search_focused = ui.render_toolbar_with_search(
+            draft_buffer,
+            scale,
+            alt_key and ('slip_alt_%s'):format(alt_key) or 'slip',
+            {},
+            {
+                align_width = metrics.grid_width + metrics.scrollbar_w,
+                centered = true,
+                search_active = active_search ~= '',
+                active_search_text = active_search,
+            }
+        )
+        if alt_key then
+            note_search_input_focused(slip_search_focused, 'alt', alt_key)
+        else
+            note_search_input_focused(slip_search_focused, 'shared')
+        end
+        if slip_toolbar_clicks.search then
+            if alt_key then
+                commit_alt_search(alt_key)
+                active_search = get_alt_active_search(alt_key)
+            else
+                commit_search()
+                active_search = get_active_search()
+            end
+        elseif slip_toolbar_clicks.cancel then
+            if alt_key then
+                clear_alt_search(alt_key)
+            else
+                clear_search()
+            end
+            active_search = ''
+        end
+        imgui.Spacing()
+
+        ui.begin_child('##satchel_slip_body', { 0, metrics.grid_height }, false, ui.NO_SCROLL_CHILD_FLAGS)
+        local grid_ctx = build_slip_grid_context()
+        grid_ctx.search_query = active_search
+        grid_ctx.centered = true
+        grid_ctx.grid_slot_count = slipslogic.PAGE_SIZE
+        ui.render_slot_grid(slots, ('slip_%d_%d'):format(slip_id, satchel.slip_view.page), {
+            used = #stored_items,
+            total = #stored_items,
+        }, grid_ctx)
+        satchel.drag.slip.window_move_blocked = ui.should_block_satchel_window_move(DRAG_SCOPE_SLIP)
+        ui.end_child()
+
+        ui.render_slip_window_footer(#stored_items, satchel.slip_view.page, page_count, function(new_page)
+            satchel.slip_view.page = math.max(0, math.min(page_count - 1, new_page))
+        end, scale, {
+            grid_width = metrics.grid_width + metrics.scrollbar_w,
+        })
+        render_context_menu()
+        end_chrome_font(chrome_pushed)
+    end
+    imgui.End()
+    if not satchel.slip_view.visible[1] then
+        satchel.slip_view.slip_id = nil
+        satchel.slip_view.alt_entry = nil
+    end
+    ui.pop_config_window_style()
+end
+
+local function draw_alt_picker_window(scale)
+    if not satchel.alt_picker.visible[1] then
+        return
+    end
+
+    local entries = altcache.list_character_caches()
+    ui.push_config_window_style()
+    local picker_w = ui.scaled(220, scale)
+    local picker_h = get_picker_window_height(math.max(1, #entries), scale)
+    ui.set_window_size(picker_w, picker_h)
+
+    local began = imgui.Begin('Satchel Alt Inventories', satchel.alt_picker.visible, WINDOW_FLAGS)
+    if began then
+        local chrome_pushed = begin_chrome_font(scale)
+        ui.render_alt_character_list(entries, function(entry)
+            open_alt_view(entry)
+        end, scale)
+        end_chrome_font(chrome_pushed)
+    end
+    imgui.End()
+    ui.pop_config_window_style()
+end
+
+local function get_alt_available_tabs(entry)
+    local available_tabs = {}
+    for _, container_id in ipairs(tab_order) do
+        if container_id ~= 3 and not (container_id == 9 and HzLimitedMode) then
+            if altcache.container_has_items(entry, container_id) then
+                available_tabs[#available_tabs + 1] = container_id
+            end
+        end
+    end
+    return available_tabs
+end
+
+local function draw_alt_inventory_window(scale)
+    if not satchel.alt_view.visible[1] or not satchel.alt_view.entry then
+        return
+    end
+
+    local entry = satchel.alt_view.entry
+    local available_tabs = get_alt_available_tabs(entry)
+
+    if #available_tabs == 0 then
+        ui.push_config_window_style()
+        local empty_w = ui.scaled(320, scale)
+        local empty_h = ui.scaled(120, scale)
+        ui.set_window_size(empty_w, empty_h)
+        local title = ('Satchel: %s'):format(entry.name or 'Alt')
+        local began = imgui.Begin(title, satchel.alt_view.visible, WINDOW_FLAGS)
+        if began then
+            local chrome_pushed = begin_chrome_font(scale)
+            imgui.TextColored({ 0.9, 0.72, 0.55, 1.0 }, 'No cached inventory data for this character.')
+            end_chrome_font(chrome_pushed)
+        end
+        imgui.End()
+        ui.pop_config_window_style()
+        return
+    end
+
+    satchel.alt_view.active_tab = ensure_active_tab(satchel.alt_view.active_tab, available_tabs)
+
+    local active_tab = satchel.alt_view.active_tab
+    local active_slots = get_alt_visual_slots(entry, active_tab)
+    local used = 0
+    for _, slot in ipairs(active_slots) do
+        if slot.id and slot.id > 0 then
+            used = used + 1
+        end
+    end
+
+    local win_w, win_h, metrics, tab_width = compute_content_window_size(
+        scale,
+        ui.scaled(40, scale),
+        {
+            enabled = true,
+            show_alt_button = false,
+            show_slips_button = slipslogic.has_cached_slips(entry.slips),
+        },
+        #available_tabs
+    )
+
+    local alt_slots_by_container = {}
+    for _, container_id in ipairs(available_tabs) do
+        alt_slots_by_container[container_id] = get_alt_visual_slots(entry, container_id)
+    end
+    local alt_slip_ids = slipslogic.has_cached_slips(entry.slips) and get_slip_picker_ids(entry) or {}
+
+    ui.push_config_window_style()
+    ui.set_window_size(win_w, win_h)
+
+    local title = ('Satchel: %s'):format(entry.name or 'Alt')
+    local began = imgui.Begin(title, satchel.alt_view.visible, get_window_flags_for_scope(DRAG_SCOPE_ALT))
+    if began then
+        local chrome_pushed = begin_chrome_font(scale)
+        local alt_key = alt_search_key(entry)
+        local alt_search = get_alt_active_search(alt_key)
+        local alt_match_containers, _, alt_has_slip_matches = compute_search_chrome(
+            alt_search,
+            alt_slots_by_container,
+            alt_slip_ids,
+            function(slip_id)
+                return slipslogic.get_stored_items_from_cache(entry.slips, slip_id)
+            end
+        )
+        local toolbar_clicks, alt_search_focused = ui.render_toolbar_with_search(
+            get_alt_draft_buffer(alt_key),
+            scale,
+            ('alt_%s'):format(alt_key),
+            {
+                { id = 'slips', label = 'Storage Slips', visible = slipslogic.has_cached_slips(entry.slips) },
+            },
+            {
+                align_width = ui.get_toolbar_grid_align_width(metrics, scale, #available_tabs, metrics.grid_height),
+                search_active = alt_search ~= '',
+                active_search_text = alt_search,
+                is_dragging = satchel.drag.alt.active == true,
+                highlight_button_ids = alt_search ~= '' and {
+                    slips = alt_has_slip_matches,
+                } or nil,
+            }
+        )
+        note_search_input_focused(alt_search_focused, 'alt', alt_key)
+        if toolbar_clicks.search then
+            commit_alt_search(alt_key)
+            alt_search = get_alt_active_search(alt_key)
+            alt_match_containers, _, alt_has_slip_matches = compute_search_chrome(
+                alt_search,
+                alt_slots_by_container,
+                alt_slip_ids,
+                function(slip_id)
+                    return slipslogic.get_stored_items_from_cache(entry.slips, slip_id)
+                end
+            )
+        elseif toolbar_clicks.cancel then
+            clear_alt_search(alt_key)
+            alt_search = ''
+            alt_match_containers = {}
+            alt_has_slip_matches = false
+        end
+        if toolbar_clicks.slips then
+            open_slips_picker(entry)
+        end
+        imgui.Spacing()
+
+        local grid_h = metrics.grid_height
+        local sidebar_width = tab_width
+        local sidebar_gap = ui.scaled(8, scale)
+
+        ui.begin_child('##satchel_alt_body', { 0, grid_h }, false, ui.NO_SCROLL_CHILD_FLAGS)
+        local current_tab = ui.render_scrollable_tab_sidebar(
+            '##satchel_alt_tabs',
+            sidebar_width,
+            grid_h,
+            available_tabs,
+            active_tab,
+            function(container_id)
+                return containerlogic.format_tab_label(container_id)
+            end,
+            {
+                search_active = alt_search ~= '',
+                search_match_containers = alt_match_containers,
+            },
+            scale
+        )
+
+        if current_tab ~= nil and current_tab ~= satchel.alt_view.active_tab then
+            satchel.alt_view.active_tab = current_tab
+            active_tab = current_tab
+            active_slots = get_alt_visual_slots(entry, active_tab)
+            used = 0
+            for _, slot in ipairs(active_slots) do
+                if slot.id and slot.id > 0 then
+                    used = used + 1
+                end
+            end
+        end
+
+        imgui.SameLine(0, sidebar_gap)
+        ui.begin_child('##satchel_alt_grid', { 0, grid_h }, false, ui.NO_SCROLL_CHILD_FLAGS)
+        local grid_ctx = build_alt_grid_context(entry)
+        apply_cached_gil_display(grid_ctx, entry.gil)
+        ui.render_slot_grid(active_slots, ('alt_%s_%d'):format(entry.key or 'alt', active_tab or 0), {
+            used = used,
+            total = DISPLAY_SLOTS,
+        }, grid_ctx)
+        satchel.drag.alt.window_move_blocked = ui.should_block_satchel_window_move(DRAG_SCOPE_ALT)
+        ui.end_child()
+        ui.end_child()
+
+        ui.render_inventory_footer({
+            used = used,
+            total = DISPLAY_SLOTS,
+        }, grid_ctx, {
+            scale = scale,
+            sidebar_width = sidebar_width,
+            gap = sidebar_gap,
+        })
+
+        render_context_menu()
+        end_chrome_font(chrome_pushed)
+    end
+    imgui.End()
+    if not satchel.alt_view.visible[1] then
+        if satchel.alt_view.entry then
+            clear_alt_search(satchel.alt_view.entry)
+        end
+        satchel.alt_view.entry = nil
+        satchel.alt_view.active_tab = nil
+    end
+    ui.pop_config_window_style()
+end
+
+local function draw_auxiliary_windows(scale)
+    draw_slips_picker_window(scale)
+    draw_slip_content_window(scale)
+    draw_alt_picker_window(scale)
+    draw_alt_inventory_window(scale)
 end
 
 function M.Initialize()
@@ -459,18 +2407,29 @@ function M.Initialize()
     end
 
     read_settings()
+    layoutstate.reload_sort_from_config(satchel.container_sorted)
+    layoutstate.reload_from_config(satchel.display_layouts)
+    layoutstate.reload_alt_from_config(satchel.alt_display_layouts)
+    layoutstate.reload_slip_from_config(satchel.slip_display_layouts)
+    close_all_satchel_windows()
 
-    local login_status = AshitaCore:GetMemoryManager():GetPlayer():GetLoginStatus()
-    local in_game = (login_status == 2)
+    local in_game = (AshitaCore:GetMemoryManager():GetPlayer():GetLoginStatus() == 2)
     satchel.in_mog_house = in_game and read_mog_state() or false
-    satchel.visible[1] = in_game and (satchel.settings.visible == true)
-    satchel.last_visible = satchel.visible[1]
+
+    tooltips.preload_assets(satchel, addon.path)
+    satchelfonts.capture_chrome_base_px()
+    sync_all_satchel_fonts(ui.get_global_scale(), true)
 
     satchel.initialized = true
 end
 
 function M.UpdateVisuals()
     read_settings()
+    layoutstate.reload_sort_from_config(satchel.container_sorted)
+    layoutstate.reload_from_config(satchel.display_layouts)
+    layoutstate.reload_alt_from_config(satchel.alt_display_layouts)
+    layoutstate.reload_slip_from_config(satchel.slip_display_layouts)
+    sync_all_satchel_fonts(ui.get_global_scale(), false)
     invalidate_slot_cache()
 end
 
@@ -483,106 +2442,236 @@ function M.DrawWindow()
         return
     end
 
-    if not satchel.visible[1] then
-        return
+    satchel.search.focus_seen = false
+
+    sync_chrome_fonts(ui.get_global_scale())
+
+    if is_module_enabled() then
+        altcache.tick()
     end
 
-    -- Pick up live config changes (columns/size/empty-slots/containers) each frame.
+    local scale = ui.get_global_scale()
+
     if sync_display_settings() then
         invalidate_slot_cache()
     end
 
+    if not satchel.visible[1] then
+        draw_auxiliary_windows(scale)
+        tick_search_enter_guard()
+        finish_search_focus_frame()
+        finalize_drag_frame()
+        return
+    end
+
     local _, slots_by_container, stats = get_slot_data(false)
+    tick_auto_sort_server(stats)
 
-    for i = 1, #WINDOW_COLORS do
-        imgui.PushStyleColor(WINDOW_COLORS[i][1], WINDOW_COLORS[i][2])
-    end
-    imgui.PushStyleVar(ImGuiStyleVar_WindowRounding, 6.0)
-    imgui.PushStyleVar(ImGuiStyleVar_WindowBorderSize, 2.0)
-    imgui.PushStyleVar(ImGuiStyleVar_FrameRounding, 4.0)
-    imgui.PushStyleVar(ImGuiStyleVar_ChildRounding, 3.0)
-    local pushed_style_vars = 4
-    if ImGuiStyleVar_WindowTitleAlign ~= nil then
-        imgui.PushStyleVar(ImGuiStyleVar_WindowTitleAlign, { 0.5, 0.5 })
-        pushed_style_vars = pushed_style_vars + 1
-    end
+    local display_tabs = build_display_tabs(stats)
+    local show_slips_button = slipslogic.has_any_owned_slips()
+    local owned_slip_ids = show_slips_button and get_slip_picker_ids(nil) or {}
 
-    local consume_resize = satchel.resize_on_next_frame == true
-    local window_flags = WINDOW_BASE_FLAGS
-    if consume_resize then
-        window_flags = bor(window_flags, ImGuiWindowFlags_AlwaysAutoResize or 0)
+    if satchel.active_tab == nil or not tab_is_available(satchel.active_tab, display_tabs) then
+        satchel.active_tab = resolve_default_active_tab(display_tabs)
     end
-    satchel.resize_on_next_frame = false
+    local display_tab = get_display_tab()
 
-    local began = imgui.Begin('Satchel', satchel.visible, window_flags)
+    local win_w, win_h, metrics = compute_main_window_size(scale, show_slips_button, #display_tabs)
+    ui.push_config_window_style()
+    ui.set_window_size(win_w, win_h)
+
+    local began = imgui.Begin('Satchel', satchel.visible, get_satchel_window_flags())
     if began then
-        handle_title_bar_drag()
         satchel.settings.visible = satchel.visible[1]
-
-        local available_tabs = {}
-        for _, container_id in ipairs(tab_order) do
-            if containerlogic.is_tab_available(container_id, stats) then
-                available_tabs[#available_tabs + 1] = container_id
+        local chrome_pushed = begin_chrome_font(scale)
+        local main_dragging = satchel.drag.main.active == true
+        local main_search = get_active_search()
+        local match_containers, slips_with_matches, has_slip_matches = compute_search_chrome(
+            main_search,
+            slots_by_container,
+            owned_slip_ids,
+            function(slip_id)
+                return slipslogic.get_stored_items(slip_id)
             end
+        )
+
+        local toolbar_clicks, main_search_focused = ui.render_toolbar_with_search(
+            satchel.search.draft,
+            scale,
+            'main',
+            {
+                { id = 'alt', label = 'Alt Inventories' },
+                { id = 'slips', label = 'Storage Slips', visible = show_slips_button },
+            },
+            {
+                align_width = ui.get_toolbar_grid_align_width(metrics, scale, #display_tabs, metrics.grid_height),
+                search_active = main_search ~= '',
+                active_search_text = main_search,
+                is_dragging = main_dragging,
+                -- true = ant border; false = dim only (alt never matches, dimmed for uniformity).
+                highlight_button_ids = main_search ~= '' and {
+                    alt = false,
+                    slips = has_slip_matches,
+                } or nil,
+            }
+        )
+        note_search_input_focused(main_search_focused, 'shared')
+        if toolbar_clicks.search then
+            commit_search()
+            main_search = get_active_search()
+            match_containers, slips_with_matches, has_slip_matches = compute_search_chrome(
+                main_search,
+                slots_by_container,
+                owned_slip_ids,
+                function(slip_id)
+                    return slipslogic.get_stored_items(slip_id)
+                end
+            )
+        elseif toolbar_clicks.cancel then
+            clear_search()
+            main_search = ''
+            match_containers, slips_with_matches, has_slip_matches = compute_search_chrome(
+                main_search,
+                slots_by_container,
+                owned_slip_ids,
+                function(slip_id)
+                    return slipslogic.get_stored_items(slip_id)
+                end
+            )
+        end
+        if toolbar_clicks.alt then
+            open_alt_picker()
+        end
+        if toolbar_clicks.slips then
+            open_slips_picker(nil)
         end
 
-        if #available_tabs == 0 then
+        imgui.Spacing()
+
+        local sidebar_width = ui.get_tab_sidebar_width(
+            scale,
+            ui.tab_sidebar_needs_scrollbar(#display_tabs, metrics.grid_height, scale)
+        )
+        local sidebar_gap = ui.scaled(8, scale)
+        local grid_h = metrics.grid_height
+        local grid_ctx = build_grid_context(true)
+
+        if #display_tabs == 0 then
             satchel.active_tab = nil
             imgui.TextColored({ 0.9, 0.72, 0.55, 1.0 }, 'No available inventory containers.')
         else
-            local top_x, top_y = imgui.GetCursorPos()
+            ui.begin_child('##satchel_main_body', { 0, grid_h }, false, ui.NO_SCROLL_CHILD_FLAGS)
 
-            imgui.BeginGroup()
-            local current_tab = render_left_tab_column(available_tabs, stats)
-            imgui.EndGroup()
-
-            if current_tab ~= satchel.active_tab then
-                satchel.active_tab = current_tab
-                satchel.resize_on_next_frame = true
+            local tab_drag_ctx = {
+                search_active = main_search ~= '',
+                search_match_containers = match_containers,
+            }
+            if not is_horizon_mode() then
+                tab_drag_ctx.is_dragging = satchel.drag.main.active
+                tab_drag_ctx.get_source_container = function()
+                    local slot = satchel.drag.main.source_slot
+                    return slot and tonumber(slot.container_id) or nil
+                end
+                tab_drag_ctx.can_drop_to_container = function(container_id)
+                    if not satchel.drag.main.source_slot then
+                        return false
+                    end
+                    return can_drop_slot_to_container(satchel.drag.main.source_slot, container_id, stats)
+                end
+                tab_drag_ctx.on_tab_hover = function(container_id)
+                    satchel.drag.main.view_tab = container_id
+                end
+                tab_drag_ctx.get_selected_tab = function()
+                    return get_display_tab()
+                end
+                tab_drag_ctx.on_drop_to_container = function(container_id)
+                    handle_drop_to_container(container_id)
+                end
+                tab_drag_ctx.is_container_full = function(container_id)
+                    local s = stats[container_id]
+                    return s ~= nil and (s.total or 0) > 0 and (s.used or 0) >= s.total
+                end
             end
 
-            imgui.SameLine(0, 8)
-            imgui.SetCursorPos({ top_x + 118, top_y })
-            imgui.BeginGroup()
-            local active_slots = slots_by_container[satchel.active_tab] or {}
-            local active_stats = stats[satchel.active_tab] or { used = 0, total = 0 }
-            render_slot_grid(active_slots, tostring(satchel.active_tab or 0), active_stats)
-            imgui.EndGroup()
-        end
+            local current_tab = ui.render_scrollable_tab_sidebar(
+                '##satchel_main_tabs',
+                sidebar_width,
+                grid_h,
+                display_tabs,
+                display_tab,
+                function(container_id)
+                    return containerlogic.format_tab_label(container_id)
+                end,
+                tab_drag_ctx,
+                scale
+            )
 
-        render_drag_preview()
+            if not satchel.drag.main.active
+                and not satchel.drag.main.drop_handled
+                and current_tab ~= nil
+                and current_tab ~= satchel.active_tab then
+                satchel.active_tab = current_tab
+                display_tab = current_tab
+            end
 
-        if satchel.drag.active and imgui.IsMouseReleased(ImGuiMouseButton_Left) then
-            clear_drag_state()
+            imgui.SameLine(0, sidebar_gap)
+
+            if satchel.drag.main.active then
+                display_tab = get_display_tab()
+            else
+                display_tab = satchel.active_tab
+            end
+
+            ui.begin_child('##satchel_main_grid', { 0, grid_h }, false, ui.NO_SCROLL_CHILD_FLAGS)
+            local raw_slots = slots_by_container[display_tab] or {}
+            local active_slots = get_visual_slots_for_container(display_tab, raw_slots, stats)
+            local active_stats = stats[display_tab] or { used = 0, total = 0, display = DISPLAY_SLOTS }
+            ui.render_slot_grid(active_slots, tostring(display_tab or 0), active_stats, grid_ctx)
+            satchel.drag.main.window_move_blocked = ui.should_block_satchel_window_move(DRAG_SCOPE_MAIN)
+            ui.end_child()
+            ui.end_child()
+
+            ui.render_inventory_footer(active_stats, grid_ctx, {
+                scale = scale,
+                sidebar_width = sidebar_width,
+                gap = sidebar_gap,
+            })
         end
 
         render_context_menu()
+        end_chrome_font(chrome_pushed)
     end
     imgui.End()
 
-    if satchel.visible[1] ~= satchel.last_visible then
-        satchel.last_visible = satchel.visible[1]
-        satchel.settings.visible = satchel.visible[1]
-        persist_settings()
+    if not satchel.visible[1] then
+        satchel.settings.visible = false
+        clear_search()
     end
+    satchel.last_visible = satchel.visible[1]
 
-    imgui.PopStyleVar(pushed_style_vars)
-    imgui.PopStyleColor(4)
+    ui.pop_config_window_style()
+
+    draw_auxiliary_windows(scale)
+    tick_search_enter_guard()
+    finish_search_focus_frame()
+    finalize_drag_frame()
 end
 
 function M.SetHidden(hidden)
     satchel.hidden = hidden == true
     if satchel.hidden then
         clear_drag_state()
-        satchel.window_drag.active = false
     end
 end
 
 function M.Cleanup()
+    close_all_satchel_windows()
     satchel.icons = {}
     satchel.file_icons = {}
+    ui.clear_pending_drag()
     items.clear_caches()
     invalidate_slot_cache()
+    altcache.invalidate()
     satchel.initialized = false
 end
 
@@ -593,7 +2682,7 @@ function M.ResetPositions()
     end
 end
 
---@cmd /satchel : Toggle the satchel window
+--@cmd /satchel : Toggle all satchel windows (requires Override /satchel in settings)
 function M.HandleCommand(e)
     local args = e.command:args()
     if #args == 0 or args[1]:lower() ~= '/satchel' then
@@ -614,7 +2703,7 @@ function M.HandleCommand(e)
     end
 
     if #args == 1 then
-        toggle_visible()
+        toggle_satchel_command()
         return true
     end
 
@@ -638,7 +2727,7 @@ function M.HandleXiuiCommand(command_args)
     end
 
     if #command_args == 2 then
-        toggle_visible()
+        toggle_satchel_command()
         return true
     end
 
@@ -651,7 +2740,21 @@ function M.HandleKey(e)
         return
     end
 
-    if not satchel.visible[1] then
+    if not any_satchel_window_visible() then
+        return
+    end
+
+    local is_key_down = band(e.lparam, 0x80000000) == 0
+    local vk = tonumber(e.wparam) or e.wparam
+
+    -- Eat Enter while search is active (and briefly after commit). Do not synthesize
+    -- key-ups here — tick_search_enter_guard handles that without re-entering this handler.
+    if vk == VK_RETURN and enter_block_active() then
+        if is_key_down and (satchel.search.input_focused or imgui_wants_text_input()) then
+            commit_focused_search()
+        end
+        arm_enter_block(ENTER_BLOCK_TRAIL_SEC)
+        e.blocked = true
         return
     end
 
@@ -660,27 +2763,23 @@ function M.HandleKey(e)
         return
     end
 
-    if e.wparam ~= 0x1B then
+    if vk ~= 0x1B then
         return
     end
 
-    local is_key_down = band(e.lparam, 0x80000000) == 0
     if not is_key_down then
         return
     end
 
-    local changed_visibility = false
-    if satchel.visible[1] then
-        satchel.visible[1] = false
-        satchel.last_visible = false
-        satchel.settings.visible = false
-        changed_visibility = true
+    -- Search takes precedence: clear draft/active search before closing a window.
+    if try_clear_search() then
+        e.blocked = true
+        return
     end
 
-    if changed_visibility then
-        persist_settings()
+    if close_top_satchel_window() then
+        e.blocked = true
     end
-    e.blocked = true
 end
 
 function M.HandlePacketIn(e)
@@ -693,9 +2792,9 @@ function M.HandlePacketIn(e)
         local data = e.data_modified or e.data
         local ok, flag = pcall(struct.unpack, 'B', data, 0x80 + 1)
         if ok then set_mog_house(flag == 1) end
-        satchel.visible[1] = satchel.settings.visible == true
-        satchel.last_visible = satchel.visible[1]
+        close_all_satchel_windows()
         invalidate_slot_cache()
+        altcache.invalidate()
     elseif id == 0x096 then
         set_mog_house(true)
         invalidate_slot_cache()
