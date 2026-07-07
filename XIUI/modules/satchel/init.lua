@@ -1,7 +1,6 @@
 require('common')
 local imgui = require('imgui')
 local struct = require('struct')
-local ffi = require('ffi')
 local persistedWindow = require('libs.persisted_window')
 
 local ui = require('modules.satchel.ui')
@@ -23,42 +22,7 @@ local M = {}
 local band = bit.band
 local bor = bit.bor
 
-local VK_RETURN = 0x0D
-local SCAN_RETURN = 0x1C
-local KEYEVENTF_KEYUP = 0x0002
-local KEYEVENTF_EXTENDEDKEY = 0x0001
--- Ashita does not deliver Enter to HandleKey while ImGui text input is active.
--- Arm a short trail from the draw-path poll; after focus drops, HandleKey can
--- eat key-up/repeats. 400ms covers a realistic commit press.
-local ENTER_BLOCK_TRAIL_SEC = 0.4
 local GIL_ICON_PATH = addon.path .. '..\\satchel\\assets\\gil.png'
-
-pcall(function()
-    ffi.cdef[[
-        short __stdcall GetAsyncKeyState(int vKey);
-        void __stdcall keybd_event(unsigned char bVk, unsigned char bScan, unsigned long dwFlags, unsigned long dwExtraInfo);
-    ]]
-end)
-
-local function is_enter_physically_down()
-    local ok, state = pcall(function()
-        return ffi.C.GetAsyncKeyState(VK_RETURN)
-    end)
-    return ok and state and band(state, 0x8000) ~= 0
-end
-
--- Both Enter keys map to VK_RETURN; release main and extended scan codes together.
-local function release_enter_keys()
-    pcall(function()
-        ffi.C.keybd_event(VK_RETURN, SCAN_RETURN, KEYEVENTF_KEYUP, 0)
-        ffi.C.keybd_event(
-            VK_RETURN,
-            SCAN_RETURN,
-            bor(KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP),
-            0
-        )
-    end)
-end
 
 local WINDOW_FLAGS = bor(
     ImGuiWindowFlags_NoResize or 0,
@@ -159,25 +123,15 @@ local satchel = T{
         active_tab = nil,
     },
     search = {
-        -- Shared by main satchel and the player's storage-slip windows.
         draft = { '' },
-        active = '',
-        -- Per-alt-character search (bags + that alt's slip picker/content):
-        -- [entry.key] = { draft = { '' }, active = '' }
-        alt = {},
-        -- True while any satchel search field is focused (cleared end-of-frame).
+        alt = {}, -- [entry.key] = { draft = { '' } }
         input_focused = false,
-        -- Set each frame when a search field reports focus.
         focus_seen = false,
-        -- Sticky gate: set on focus/commit, cleared only after enter_block_until.
-        consume_enter = false,
-        -- 'shared' or 'alt' — which search Enter/ESC should act on.
-        input_scope = 'shared',
+        input_scope = 'shared', -- 'shared' or 'alt'
         input_alt_key = nil,
-        -- os.clock() deadline; Enter stays blocked until this time.
-        enter_block_until = 0,
-        -- Previous-frame Enter key state for poll edge detection.
-        enter_poll_down = false,
+        -- Bumped when inventory changes so search match cache can refresh.
+        match_inv_gen = 0,
+        index = nil, -- rebuilt when query or match_inv_gen changes
     },
     window_stack = {},
 }
@@ -343,42 +297,8 @@ local function normalize_search_text(query)
     return (query:match('^%s*(.-)%s*$') or '')
 end
 
-local function compute_search_chrome(query, slots_by_container, slip_ids, slip_items_fn)
-    local containers = {}
-    local slips = {}
-    local has_slip_matches = false
-    query = normalize_search_text(query)
-    if query == '' then
-        return containers, slips, has_slip_matches
-    end
-
-    for container_id, slots in pairs(slots_by_container or {}) do
-        local cid = tonumber(container_id) or container_id
-        for _, slot in ipairs(slots or {}) do
-            if items.matches_search(slot, query) then
-                containers[cid] = true
-                break
-            end
-        end
-    end
-
-    for _, slip_id in ipairs(slip_ids or {}) do
-        local stored = slip_items_fn and slip_items_fn(slip_id) or {}
-        for _, entry in ipairs(stored) do
-            local item_id = type(entry) == 'table' and (entry.id or entry.Id or entry.item_id) or entry
-            if items.matches_search(item_id, query) then
-                slips[slip_id] = true
-                has_slip_matches = true
-                break
-            end
-        end
-    end
-
-    return containers, slips, has_slip_matches
-end
-
-local function get_active_search()
-    return normalize_search_text(satchel.search.active)
+local function current_search_inv_gen()
+    return satchel.search.match_inv_gen or 0
 end
 
 local function get_draft_search()
@@ -386,45 +306,10 @@ local function get_draft_search()
     return normalize_search_text(draft and draft[1])
 end
 
-local function arm_enter_block(trail_sec)
-    satchel.search.consume_enter = true
-    local until_t = os.clock() + (trail_sec or ENTER_BLOCK_TRAIL_SEC)
-    if until_t > (satchel.search.enter_block_until or 0) then
-        satchel.search.enter_block_until = until_t
-    end
-end
-
-local function imgui_wants_text_input()
-    local ok, io = pcall(function()
-        return imgui.GetIO()
-    end)
-    return ok and io and io.WantTextInput == true
-end
-
-local function enter_block_active()
-    if satchel.search.input_focused or imgui_wants_text_input() then
-        return true
-    end
-    if not satchel.search.consume_enter then
-        return false
-    end
-    if os.clock() < (satchel.search.enter_block_until or 0) then
-        return true
-    end
-    satchel.search.consume_enter = false
-    return false
-end
-
-local function commit_search()
-    satchel.search.active = get_draft_search()
-    arm_enter_block(ENTER_BLOCK_TRAIL_SEC)
-end
-
 local function clear_search()
     if satchel.search.draft then
         satchel.search.draft[1] = ''
     end
-    satchel.search.active = ''
 end
 
 local function alt_search_key(entry_or_key)
@@ -440,15 +325,9 @@ local function get_alt_search_state(entry_or_key)
     if not by_alt[key] then
         by_alt[key] = {
             draft = { '' },
-            active = '',
         }
     end
     return by_alt[key], key
-end
-
-local function get_alt_active_search(entry_or_key)
-    local state = get_alt_search_state(entry_or_key)
-    return normalize_search_text(state.active)
 end
 
 local function get_alt_draft_search(entry_or_key)
@@ -461,22 +340,69 @@ local function get_alt_draft_buffer(entry_or_key)
     return state.draft
 end
 
-local function commit_alt_search(entry_or_key)
-    local state = get_alt_search_state(entry_or_key)
-    state.active = get_alt_draft_search(entry_or_key)
-    arm_enter_block(ENTER_BLOCK_TRAIL_SEC)
-end
-
 local function clear_alt_search(entry_or_key)
     local state = get_alt_search_state(entry_or_key)
     if state.draft then
         state.draft[1] = ''
     end
-    state.active = ''
 end
 
 local function clear_all_alt_searches()
     satchel.search.alt = {}
+end
+
+-- Scan inventory once when the query or inventory generation changes; render only lookups.
+local function ensure_search_index(query, slots_by_container, slip_ids, slip_items_fn)
+    local normalized = normalize_search_text(query)
+    local inv_gen = current_search_inv_gen()
+    local cached = satchel.search.index
+    if cached and cached.query == normalized and cached.inv_gen == inv_gen then
+        return cached
+    end
+
+    satchel.search.index = items.build_search_index(
+        normalized,
+        inv_gen,
+        slots_by_container,
+        slip_ids,
+        slip_items_fn
+    )
+    return satchel.search.index
+end
+
+local function ensure_alt_search_index(alt_key, query, slots_by_container, slip_ids, slip_items_fn)
+    local state = get_alt_search_state(alt_key)
+    local normalized = normalize_search_text(query)
+    local inv_gen = current_search_inv_gen()
+    if state.index and state.index.query == normalized and state.index.inv_gen == inv_gen then
+        return state.index
+    end
+
+    state.index = items.build_search_index(
+        normalized,
+        inv_gen,
+        slots_by_container,
+        slip_ids,
+        slip_items_fn
+    )
+    return state.index
+end
+
+local function ensure_slip_page_search_index(query, slots)
+    local normalized = normalize_search_text(query)
+    local inv_gen = current_search_inv_gen()
+    local view = satchel.slip_view
+    local cached = view.search_index
+    if cached
+        and cached.query == normalized
+        and cached.inv_gen == inv_gen
+        and cached.page == view.page then
+        return cached
+    end
+
+    view.search_index = items.build_search_index_for_slots(normalized, inv_gen, slots)
+    view.search_index.page = view.page
+    return view.search_index
 end
 
 local function note_search_input_focused(focused, scope, alt_key)
@@ -485,8 +411,6 @@ local function note_search_input_focused(focused, scope, alt_key)
         satchel.search.input_focused = true
         satchel.search.input_scope = scope or 'shared'
         satchel.search.input_alt_key = alt_key
-        -- Refresh the trail while focused so it starts from focus-loss/commit.
-        arm_enter_block(ENTER_BLOCK_TRAIL_SEC)
     end
 end
 
@@ -495,23 +419,6 @@ local function finish_search_focus_frame()
         satchel.search.input_focused = false
     end
     satchel.search.focus_seen = false
-end
-
-local function commit_focused_search()
-    if satchel.search.input_scope == 'alt' and satchel.search.input_alt_key then
-        local key = satchel.search.input_alt_key
-        if get_alt_draft_search(key) ~= '' then
-            commit_alt_search(key)
-        elseif get_alt_active_search(key) ~= '' then
-            clear_alt_search(key)
-            arm_enter_block(ENTER_BLOCK_TRAIL_SEC)
-        end
-    elseif get_draft_search() ~= '' then
-        commit_search()
-    elseif get_active_search() ~= '' then
-        clear_search()
-        arm_enter_block(ENTER_BLOCK_TRAIL_SEC)
-    end
 end
 
 local function annotate_display_indices(slots)
@@ -758,6 +665,7 @@ local function invalidate_slot_cache()
     satchel.slot_cache.all_slots = nil
     satchel.slot_cache.slots_by_container = nil
     satchel.slot_cache.stats = nil
+    satchel.search.match_inv_gen = (satchel.search.match_inv_gen or 0) + 1
 end
 
 local function get_slot_data(force_refresh)
@@ -1483,7 +1391,8 @@ end
 
 local render_context_menu = menus.render
 
-local function build_grid_context(include_gil)
+local function build_grid_context(include_gil, search_index)
+    search_index = search_index or satchel.search.index
     local grid_ctx = {
         settings = satchel.settings,
         default_slot_size = default_settings.slot_size,
@@ -1494,9 +1403,16 @@ local function build_grid_context(include_gil)
         end,
         tex_ptr = icons.tex_ptr,
         get_slot_border_color = items.get_slot_border_color,
+        get_slot_border_u32 = items.get_slot_border_color_u32,
+        get_empty_border_u32 = items.get_empty_slot_border_u32,
+        prepare_slot_render = items.ensure_equipped_lookup,
         render_item_detail_tooltip = items.render_item_detail_tooltip,
-        item_matches_search = items.matches_search,
-        search_query = get_active_search(),
+        item_matches_search = function(slot, _)
+            return items.index_matches_slot(search_index, slot)
+        end,
+        search_query = (search_index and search_index.query) or '',
+        search_active = search_index ~= nil and search_index.query ~= '',
+        search_index = search_index,
         scale = ui.get_global_scale(),
         hide_gil = not include_gil,
     }
@@ -1590,8 +1506,8 @@ local function build_grid_context(include_gil)
     return grid_ctx
 end
 
-local function build_slip_grid_context()
-    local grid_ctx = build_grid_context(false)
+local function build_slip_grid_context(search_index)
+    local grid_ctx = build_grid_context(false, search_index)
     grid_ctx.read_only = true
     grid_ctx.visual_sort_only = true
     configure_visual_drag_context(grid_ctx, DRAG_SCOPE_SLIP, function(drag_state, target_slot)
@@ -1641,9 +1557,8 @@ local function build_slip_grid_context()
     return grid_ctx
 end
 
-local function build_alt_grid_context(entry)
-    local grid_ctx = build_grid_context(false)
-    grid_ctx.search_query = get_alt_active_search(entry)
+local function build_alt_grid_context(entry, search_index)
+    local grid_ctx = build_grid_context(false, search_index)
     grid_ctx.read_only = true
     grid_ctx.visual_sort_only = true
     configure_visual_drag_context(grid_ctx, DRAG_SCOPE_ALT, function(drag_state, target_slot)
@@ -1713,7 +1628,7 @@ local function ensure_active_tab(active_tab, available_tabs)
 end
 
 local function render_slot_grid(slots, key_prefix, stat)
-    local grid_ctx = build_grid_context(true)
+    local grid_ctx = build_grid_context(true, satchel.search.index)
     ui.render_slot_grid(slots, key_prefix, stat, grid_ctx)
 end
 
@@ -1792,37 +1707,57 @@ local function alt_entry_for_window(window_key)
     return nil
 end
 
--- Clears search for the topmost window that has draft/active text.
+-- Clears search for a scope. Returns true when text was cleared.
+local function search_has_text(scope, alt_key)
+    if scope == 'alt' and alt_key then
+        return get_alt_draft_search(alt_key) ~= ''
+    end
+    return get_draft_search() ~= ''
+end
+
+local function clear_search_for(scope, alt_key)
+    if scope == 'alt' and alt_key then
+        clear_alt_search(alt_key)
+    else
+        clear_search()
+    end
+end
+
+-- Clears search for the topmost visible window that has draft text.
 -- Returns true when ESC should be consumed without closing a window.
+local function clear_search_for_window(window_key)
+    local alt_entry = alt_entry_for_window(window_key)
+    if alt_entry then
+        local alt_key = alt_search_key(alt_entry)
+        if search_has_text('alt', alt_key) then
+            clear_search_for('alt', alt_key)
+            return true
+        end
+        return false
+    end
+
+    if window_key == 'main' or window_key == 'slip_view' or window_key == 'slips_picker' then
+        if search_has_text('shared') then
+            clear_search_for('shared')
+            return true
+        end
+        return false
+    end
+
+    return false
+end
+
 local function try_clear_search()
     for i = #satchel.window_stack, 1, -1 do
         local window_key = satchel.window_stack[i]
         if is_satchel_window_visible(window_key) then
-            local alt_entry = alt_entry_for_window(window_key)
-            if alt_entry then
-                local alt_key = alt_search_key(alt_entry)
-                if get_alt_active_search(alt_key) ~= '' or get_alt_draft_search(alt_key) ~= '' then
-                    clear_alt_search(alt_key)
-                    return true
-                end
-                return false
-            end
-
-            if window_key == 'main' or window_key == 'slip_view' or window_key == 'slips_picker' then
-                if get_active_search() ~= '' or get_draft_search() ~= '' then
-                    clear_search()
-                    return true
-                end
-                return false
-            end
-
-            return false
+            return clear_search_for_window(window_key)
         end
+        table.remove(satchel.window_stack, i)
     end
 
-    if is_satchel_window_visible('main')
-        and (get_active_search() ~= '' or get_draft_search() ~= '') then
-        clear_search()
+    if is_satchel_window_visible('main') and search_has_text('shared') then
+        clear_search_for('shared')
         return true
     end
 
@@ -1835,29 +1770,6 @@ local function any_satchel_window_visible()
         or is_satchel_window_visible('slip_view')
         or is_satchel_window_visible('alt_picker')
         or is_satchel_window_visible('alt_view')
-end
-
--- Poll Enter while satchel is open. ImGui text focus swallows Ashita key events, so
--- the draw path arms the post-commit trail and cancels the game-side key-down.
-local function tick_search_enter_guard()
-    if not any_satchel_window_visible() then
-        satchel.search.enter_poll_down = false
-        return
-    end
-
-    local down = is_enter_physically_down()
-    local was_down = satchel.search.enter_poll_down == true
-    local in_search = satchel.search.input_focused == true
-
-    if down and (in_search or satchel.search.consume_enter) then
-        arm_enter_block(ENTER_BLOCK_TRAIL_SEC)
-        -- Cancel game-side Enter holds; ImGui may not deliver these to HandleKey.
-        release_enter_keys()
-    elseif not down and was_down and satchel.search.consume_enter then
-        arm_enter_block(ENTER_BLOCK_TRAIL_SEC)
-    end
-
-    satchel.search.enter_poll_down = down
 end
 
 local function toggle_satchel_command()
@@ -1940,19 +1852,31 @@ local function open_alt_view(entry)
     register_window_open('alt_view')
 end
 
-local function compute_content_window_size(scale, toolbar_h, toolbar_opts, tab_count)
+local function get_content_region_layout(scale, tab_count)
     local metrics = ui.compute_grid_metrics(satchel.settings, DISPLAY_SLOTS, scale, { layout_size = true })
     local needs_tab_sb = ui.tab_sidebar_needs_scrollbar(tab_count, metrics.grid_height, scale)
-    local tab_width = ui.get_tab_sidebar_width(scale, needs_tab_sb)
+    local sidebar_width = ui.get_tab_sidebar_width(scale, needs_tab_sb)
+    local sidebar_gap = ui.scaled(8, scale)
+    return {
+        metrics = metrics,
+        sidebar_width = sidebar_width,
+        sidebar_gap = sidebar_gap,
+        grid_h = metrics.grid_height,
+        grid_block_width = metrics.grid_width + metrics.scrollbar_w,
+        toolbar_align_width = ui.get_toolbar_grid_align_width(metrics, scale, tab_count, metrics.grid_height),
+    }
+end
+
+local function compute_inventory_window_size(scale, toolbar_opts, tab_count)
+    local layout = get_content_region_layout(scale, tab_count)
     local footer_h = ui.get_footer_row_height(scale)
-    local toolbar_height = toolbar_h or ui.scaled(34, scale)
+    local toolbar_height = ui.scaled(34, scale)
     local spacing_h = ui.scaled(8, scale)
     local chrome_h = ui.get_title_bar_height(scale) + ui.scaled(16, scale)
-    local sidebar_gap = ui.scaled(8, scale)
-    -- Extra width so right-edge slot chrome (search ants) is not clipped.
+    -- Extra width so right-edge slot search highlight is not clipped.
     local pad_x = ui.scaled(24, scale) + ui.scaled(4, scale)
-    local win_w = tab_width + sidebar_gap + metrics.grid_width + metrics.scrollbar_w + pad_x
-    local win_h = chrome_h + toolbar_height + spacing_h + metrics.grid_height + footer_h
+    local win_w = layout.sidebar_width + layout.sidebar_gap + layout.grid_block_width + pad_x
+    local win_h = chrome_h + toolbar_height + spacing_h + layout.grid_h + footer_h
 
     toolbar_opts = toolbar_opts or {}
     if toolbar_opts.enabled then
@@ -1968,13 +1892,21 @@ local function compute_content_window_size(scale, toolbar_h, toolbar_opts, tab_c
         win_w = math.max(win_w, toolbar_min_w + pad_x)
     end
 
-    return win_w, win_h, metrics, tab_width
+    return win_w, win_h, layout
 end
 
 local function compute_main_window_size(scale, show_slips_button, tab_count)
-    return compute_content_window_size(scale, ui.scaled(34, scale), {
+    return compute_inventory_window_size(scale, {
         enabled = true,
         show_alt_button = true,
+        show_slips_button = show_slips_button == true,
+    }, tab_count)
+end
+
+local function compute_alt_window_size(scale, show_slips_button, tab_count)
+    return compute_inventory_window_size(scale, {
+        enabled = true,
+        show_alt_button = false,
         show_slips_button = show_slips_button == true,
     }, tab_count)
 end
@@ -2027,19 +1959,25 @@ local function draw_slips_picker_window(scale)
 
     local alt_entry = satchel.slips_picker.alt_entry
     local owned_slip_ids = get_slip_picker_ids(alt_entry)
-    local chrome_query = alt_entry and get_alt_active_search(alt_entry) or get_active_search()
-    local _, slips_with_matches = compute_search_chrome(
-        chrome_query,
-        nil,
-        owned_slip_ids,
-        function(slip_id)
-            if alt_entry then
+    local chrome_query = alt_entry and get_alt_draft_search(alt_entry) or get_draft_search()
+    local search_index = alt_entry
+        and ensure_alt_search_index(
+            alt_search_key(alt_entry),
+            chrome_query,
+            nil,
+            owned_slip_ids,
+            function(slip_id)
                 return slipslogic.get_stored_items_from_cache(alt_entry.slips, slip_id)
             end
-            return slipslogic.get_stored_items(slip_id)
-        end
-    )
-
+        )
+        or ensure_search_index(
+            chrome_query,
+            nil,
+            owned_slip_ids,
+            function(slip_id)
+                return slipslogic.get_stored_items(slip_id)
+            end
+        )
     ui.push_config_window_style()
     local picker_w = ui.scaled(220, scale)
     local picker_h = get_picker_window_height(math.max(1, #owned_slip_ids), scale)
@@ -2056,7 +1994,7 @@ local function draw_slips_picker_window(scale)
             end,
             scale,
             format_slip_button_label,
-            slips_with_matches,
+            search_index.slips,
             chrome_query ~= '',
             any_drag_active()
         )
@@ -2077,7 +2015,7 @@ local function compute_slip_window_size(scale)
     local footer_h = ui.get_footer_row_height(scale)
     local pad_x = ui.scaled(24, scale)
     local chrome_h = ui.get_title_bar_height(scale) + ui.scaled(16, scale)
-    -- Slight extra width so right-edge search ants are not clipped.
+    -- Slight extra width so right-edge search highlight is not clipped.
     local win_w = metrics.grid_width + metrics.scrollbar_w + (pad_x * 2) + ui.scaled(4, scale)
     local win_h = chrome_h + toolbar_h + spacing_h + metrics.grid_height + footer_h
     return win_w, win_h, metrics, footer_h
@@ -2116,9 +2054,9 @@ local function draw_slip_content_window(scale)
     if began then
         local chrome_pushed = begin_chrome_font(scale)
         local alt_key = alt_entry and alt_search_key(alt_entry) or nil
-        local active_search = alt_key and get_alt_active_search(alt_key) or get_active_search()
+        local active_search = alt_key and get_alt_draft_search(alt_key) or get_draft_search()
         local draft_buffer = alt_key and get_alt_draft_buffer(alt_key) or satchel.search.draft
-        local slip_toolbar_clicks, slip_search_focused = ui.render_toolbar_with_search(
+        local _, slip_search_focused = ui.render_toolbar_with_search(
             draft_buffer,
             scale,
             alt_key and ('slip_alt_%s'):format(alt_key) or 'slip',
@@ -2127,7 +2065,6 @@ local function draw_slip_content_window(scale)
                 align_width = metrics.grid_width + metrics.scrollbar_w,
                 centered = true,
                 search_active = active_search ~= '',
-                active_search_text = active_search,
             }
         )
         if alt_key then
@@ -2135,27 +2072,12 @@ local function draw_slip_content_window(scale)
         else
             note_search_input_focused(slip_search_focused, 'shared')
         end
-        if slip_toolbar_clicks.search then
-            if alt_key then
-                commit_alt_search(alt_key)
-                active_search = get_alt_active_search(alt_key)
-            else
-                commit_search()
-                active_search = get_active_search()
-            end
-        elseif slip_toolbar_clicks.cancel then
-            if alt_key then
-                clear_alt_search(alt_key)
-            else
-                clear_search()
-            end
-            active_search = ''
-        end
+        active_search = alt_key and get_alt_draft_search(alt_key) or get_draft_search()
         imgui.Spacing()
 
         ui.begin_child('##satchel_slip_body', { 0, metrics.grid_height }, false, ui.NO_SCROLL_CHILD_FLAGS)
-        local grid_ctx = build_slip_grid_context()
-        grid_ctx.search_query = active_search
+        local slip_search_index = ensure_slip_page_search_index(active_search, slots)
+        local grid_ctx = build_slip_grid_context(slip_search_index)
         grid_ctx.centered = true
         grid_ctx.grid_slot_count = slipslogic.PAGE_SIZE
         ui.render_slot_grid(slots, ('slip_%d_%d'):format(slip_id, satchel.slip_view.page), {
@@ -2252,14 +2174,9 @@ local function draw_alt_inventory_window(scale)
         end
     end
 
-    local win_w, win_h, metrics, tab_width = compute_content_window_size(
+    local win_w, win_h, layout = compute_alt_window_size(
         scale,
-        ui.scaled(40, scale),
-        {
-            enabled = true,
-            show_alt_button = false,
-            show_slips_button = slipslogic.has_cached_slips(entry.slips),
-        },
+        slipslogic.has_cached_slips(entry.slips),
         #available_tabs
     )
 
@@ -2277,8 +2194,9 @@ local function draw_alt_inventory_window(scale)
     if began then
         local chrome_pushed = begin_chrome_font(scale)
         local alt_key = alt_search_key(entry)
-        local alt_search = get_alt_active_search(alt_key)
-        local alt_match_containers, _, alt_has_slip_matches = compute_search_chrome(
+        local alt_search = get_alt_draft_search(alt_key)
+        local alt_search_index = ensure_alt_search_index(
+            alt_key,
             alt_search,
             alt_slots_by_container,
             alt_slip_ids,
@@ -2286,6 +2204,8 @@ local function draw_alt_inventory_window(scale)
                 return slipslogic.get_stored_items_from_cache(entry.slips, slip_id)
             end
         )
+        local alt_match_containers = alt_search_index.containers
+        local alt_has_slip_matches = items.index_has_slip_matches(alt_search_index)
         local toolbar_clicks, alt_search_focused = ui.render_toolbar_with_search(
             get_alt_draft_buffer(alt_key),
             scale,
@@ -2294,9 +2214,8 @@ local function draw_alt_inventory_window(scale)
                 { id = 'slips', label = 'Storage Slips', visible = slipslogic.has_cached_slips(entry.slips) },
             },
             {
-                align_width = ui.get_toolbar_grid_align_width(metrics, scale, #available_tabs, metrics.grid_height),
+                align_width = layout.toolbar_align_width,
                 search_active = alt_search ~= '',
-                active_search_text = alt_search,
                 is_dragging = satchel.drag.alt.active == true,
                 highlight_button_ids = alt_search ~= '' and {
                     slips = alt_has_slip_matches,
@@ -2304,31 +2223,28 @@ local function draw_alt_inventory_window(scale)
             }
         )
         note_search_input_focused(alt_search_focused, 'alt', alt_key)
-        if toolbar_clicks.search then
-            commit_alt_search(alt_key)
-            alt_search = get_alt_active_search(alt_key)
-            alt_match_containers, _, alt_has_slip_matches = compute_search_chrome(
-                alt_search,
-                alt_slots_by_container,
-                alt_slip_ids,
-                function(slip_id)
-                    return slipslogic.get_stored_items_from_cache(entry.slips, slip_id)
-                end
-            )
-        elseif toolbar_clicks.cancel then
-            clear_alt_search(alt_key)
-            alt_search = ''
-            alt_match_containers = {}
-            alt_has_slip_matches = false
-        end
+        alt_search = get_alt_draft_search(alt_key)
+        alt_search_index = ensure_alt_search_index(
+            alt_key,
+            alt_search,
+            alt_slots_by_container,
+            alt_slip_ids,
+            function(slip_id)
+                return slipslogic.get_stored_items_from_cache(entry.slips, slip_id)
+            end
+        )
+        alt_match_containers = alt_search_index.containers
+        alt_has_slip_matches = items.index_has_slip_matches(alt_search_index)
         if toolbar_clicks.slips then
             open_slips_picker(entry)
         end
         imgui.Spacing()
 
-        local grid_h = metrics.grid_height
-        local sidebar_width = tab_width
-        local sidebar_gap = ui.scaled(8, scale)
+        local sidebar_width = layout.sidebar_width
+        local sidebar_gap = layout.sidebar_gap
+        local grid_h = layout.grid_h
+        local grid_ctx = build_alt_grid_context(entry, alt_search_index)
+        apply_cached_gil_display(grid_ctx, entry.gil)
 
         ui.begin_child('##satchel_alt_body', { 0, grid_h }, false, ui.NO_SCROLL_CHILD_FLAGS)
         local current_tab = ui.render_scrollable_tab_sidebar(
@@ -2361,8 +2277,6 @@ local function draw_alt_inventory_window(scale)
 
         imgui.SameLine(0, sidebar_gap)
         ui.begin_child('##satchel_alt_grid', { 0, grid_h }, false, ui.NO_SCROLL_CHILD_FLAGS)
-        local grid_ctx = build_alt_grid_context(entry)
-        apply_cached_gil_display(grid_ctx, entry.gil)
         ui.render_slot_grid(active_slots, ('alt_%s_%d'):format(entry.key or 'alt', active_tab or 0), {
             used = used,
             total = DISPLAY_SLOTS,
@@ -2378,6 +2292,7 @@ local function draw_alt_inventory_window(scale)
             scale = scale,
             sidebar_width = sidebar_width,
             gap = sidebar_gap,
+            grid_block_width = layout.grid_block_width,
         })
 
         render_context_menu()
@@ -2458,7 +2373,6 @@ function M.DrawWindow()
 
     if not satchel.visible[1] then
         draw_auxiliary_windows(scale)
-        tick_search_enter_guard()
         finish_search_focus_frame()
         finalize_drag_frame()
         return
@@ -2476,7 +2390,7 @@ function M.DrawWindow()
     end
     local display_tab = get_display_tab()
 
-    local win_w, win_h, metrics = compute_main_window_size(scale, show_slips_button, #display_tabs)
+    local win_w, win_h, layout = compute_main_window_size(scale, show_slips_button, #display_tabs)
     ui.push_config_window_style()
     ui.set_window_size(win_w, win_h)
 
@@ -2485,8 +2399,8 @@ function M.DrawWindow()
         satchel.settings.visible = satchel.visible[1]
         local chrome_pushed = begin_chrome_font(scale)
         local main_dragging = satchel.drag.main.active == true
-        local main_search = get_active_search()
-        local match_containers, slips_with_matches, has_slip_matches = compute_search_chrome(
+        local main_search = get_draft_search()
+        local main_search_index = ensure_search_index(
             main_search,
             slots_by_container,
             owned_slip_ids,
@@ -2494,6 +2408,9 @@ function M.DrawWindow()
                 return slipslogic.get_stored_items(slip_id)
             end
         )
+        local match_containers = main_search_index.containers
+        local slips_with_matches = main_search_index.slips
+        local has_slip_matches = items.index_has_slip_matches(main_search_index)
 
         local toolbar_clicks, main_search_focused = ui.render_toolbar_with_search(
             satchel.search.draft,
@@ -2504,11 +2421,9 @@ function M.DrawWindow()
                 { id = 'slips', label = 'Storage Slips', visible = show_slips_button },
             },
             {
-                align_width = ui.get_toolbar_grid_align_width(metrics, scale, #display_tabs, metrics.grid_height),
+                align_width = layout.toolbar_align_width,
                 search_active = main_search ~= '',
-                active_search_text = main_search,
                 is_dragging = main_dragging,
-                -- true = ant border; false = dim only (alt never matches, dimmed for uniformity).
                 highlight_button_ids = main_search ~= '' and {
                     alt = false,
                     slips = has_slip_matches,
@@ -2516,29 +2431,18 @@ function M.DrawWindow()
             }
         )
         note_search_input_focused(main_search_focused, 'shared')
-        if toolbar_clicks.search then
-            commit_search()
-            main_search = get_active_search()
-            match_containers, slips_with_matches, has_slip_matches = compute_search_chrome(
-                main_search,
-                slots_by_container,
-                owned_slip_ids,
-                function(slip_id)
-                    return slipslogic.get_stored_items(slip_id)
-                end
-            )
-        elseif toolbar_clicks.cancel then
-            clear_search()
-            main_search = ''
-            match_containers, slips_with_matches, has_slip_matches = compute_search_chrome(
-                main_search,
-                slots_by_container,
-                owned_slip_ids,
-                function(slip_id)
-                    return slipslogic.get_stored_items(slip_id)
-                end
-            )
-        end
+        main_search = get_draft_search()
+        main_search_index = ensure_search_index(
+            main_search,
+            slots_by_container,
+            owned_slip_ids,
+            function(slip_id)
+                return slipslogic.get_stored_items(slip_id)
+            end
+        )
+        match_containers = main_search_index.containers
+        slips_with_matches = main_search_index.slips
+        has_slip_matches = items.index_has_slip_matches(main_search_index)
         if toolbar_clicks.alt then
             open_alt_picker()
         end
@@ -2548,13 +2452,10 @@ function M.DrawWindow()
 
         imgui.Spacing()
 
-        local sidebar_width = ui.get_tab_sidebar_width(
-            scale,
-            ui.tab_sidebar_needs_scrollbar(#display_tabs, metrics.grid_height, scale)
-        )
-        local sidebar_gap = ui.scaled(8, scale)
-        local grid_h = metrics.grid_height
-        local grid_ctx = build_grid_context(true)
+        local sidebar_width = layout.sidebar_width
+        local sidebar_gap = layout.sidebar_gap
+        local grid_h = layout.grid_h
+        local grid_ctx = build_grid_context(true, main_search_index)
 
         if #display_tabs == 0 then
             satchel.active_tab = nil
@@ -2635,6 +2536,7 @@ function M.DrawWindow()
                 scale = scale,
                 sidebar_width = sidebar_width,
                 gap = sidebar_gap,
+                grid_block_width = layout.grid_block_width,
             })
         end
 
@@ -2652,7 +2554,6 @@ function M.DrawWindow()
     ui.pop_config_window_style()
 
     draw_auxiliary_windows(scale)
-    tick_search_enter_guard()
     finish_search_focus_frame()
     finalize_drag_frame()
 end
@@ -2747,37 +2648,28 @@ function M.HandleKey(e)
     local is_key_down = band(e.lparam, 0x80000000) == 0
     local vk = tonumber(e.wparam) or e.wparam
 
-    -- Eat Enter while search is active (and briefly after commit). Do not synthesize
-    -- key-ups here — tick_search_enter_guard handles that without re-entering this handler.
-    if vk == VK_RETURN and enter_block_active() then
-        if is_key_down and (satchel.search.input_focused or imgui_wants_text_input()) then
-            commit_focused_search()
+    if vk ~= 0x1B or not is_key_down then
+        return
+    end
+
+    local close_on_esc = gConfig and gConfig.satchelCloseOnEscape == true
+
+    -- Focused: ImGui clears InputText on ESC — never block that path.
+    if satchel.search.input_focused then
+        if close_on_esc and not search_has_text(satchel.search.input_scope or 'shared', satchel.search.input_alt_key) then
+            if close_top_satchel_window() then
+                e.blocked = true
+            end
         end
-        arm_enter_block(ENTER_BLOCK_TRAIL_SEC)
-        e.blocked = true
         return
     end
 
-    -- Only intercept ESC when the user has opted in; otherwise ESC behaves normally.
-    if not (gConfig and gConfig.satchelCloseOnEscape == true) then
-        return
-    end
-
-    if vk ~= 0x1B then
-        return
-    end
-
-    if not is_key_down then
-        return
-    end
-
-    -- Search takes precedence: clear draft/active search before closing a window.
     if try_clear_search() then
         e.blocked = true
         return
     end
 
-    if close_top_satchel_window() then
+    if close_on_esc and close_top_satchel_window() then
         e.blocked = true
     end
 end

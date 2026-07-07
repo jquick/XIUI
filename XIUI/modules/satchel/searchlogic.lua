@@ -314,51 +314,42 @@ function M.blob_matches_query(blob, normalized, compact)
     return false
 end
 
--- Animated search match borders (drawn on slot/window draw lists).
+-- Search match highlight (single AddRect per region — no animated dashes).
 local imgui = require('imgui')
 
 local SEARCH_HIGHLIGHT_COLOR = 0xFFD4AA44
+local SEARCH_BORDER_THICKNESS = 2
 
-local last_clock_read = 0
-local cached_anim_offset = 0
+local cached_border_u32 = nil
+local cached_border_opacity = nil
+local cached_inner_dim_u32 = nil
+local cached_inner_dim_coverage = nil
 
-local function get_animation_offset()
-    local now = os.clock()
-    if now ~= last_clock_read then
-        last_clock_read = now
-        cached_anim_offset = (now * 50) % 16
+function M.get_match_border_color_u32(opacity)
+    opacity = opacity or 1
+    if cached_border_u32 ~= nil and cached_border_opacity == opacity then
+        return cached_border_u32
     end
-    return cached_anim_offset
+
+    local color = SEARCH_HIGHLIGHT_COLOR
+    local alpha = math.floor(bit.rshift(bit.band(color, 0xFF000000), 24) * opacity)
+    local r = bit.rshift(bit.band(color, 0x00FF0000), 16) / 255
+    local g = bit.rshift(bit.band(color, 0x0000FF00), 8) / 255
+    local b = bit.band(color, 0x000000FF) / 255
+    cached_border_u32 = imgui.GetColorU32({ r, g, b, alpha / 255 })
+    cached_border_opacity = opacity
+    return cached_border_u32
 end
 
-local function draw_dashed_line(draw_list, x1, y1, x2, y2, color, thickness, dash_len, gap_len, offset)
-    local dx = x2 - x1
-    local dy = y2 - y1
-    local len = math.sqrt(dx * dx + dy * dy)
-    if len == 0 then
-        return
+function M.get_match_inner_dim_u32(coverage)
+    coverage = coverage or 0.7
+    if cached_inner_dim_u32 ~= nil and cached_inner_dim_coverage == coverage then
+        return cached_inner_dim_u32
     end
 
-    local nx = dx / len
-    local ny = dy / len
-    local total_len = dash_len + gap_len
-    local start_offset = offset % total_len
-    local pos = -start_offset
-
-    while pos < len do
-        local dash_start = math.max(0, pos)
-        local dash_end = math.min(len, pos + dash_len)
-
-        if dash_end > dash_start then
-            local sx = x1 + nx * dash_start
-            local sy = y1 + ny * dash_start
-            local ex = x1 + nx * dash_end
-            local ey = y1 + ny * dash_end
-            draw_list:AddLine({ sx, sy }, { ex, ey }, color, thickness)
-        end
-
-        pos = pos + total_len
-    end
+    cached_inner_dim_u32 = imgui.GetColorU32({ 0, 0, 0, 1.0 - coverage })
+    cached_inner_dim_coverage = coverage
+    return cached_inner_dim_u32
 end
 
 function M.draw_match_border_rect(draw_list, x, y, w, h, opacity)
@@ -366,18 +357,7 @@ function M.draw_match_border_rect(draw_list, x, y, w, h, opacity)
         return
     end
 
-    local color = SEARCH_HIGHLIGHT_COLOR
-    local anim_offset = get_animation_offset()
-    local alpha = math.floor(bit.rshift(bit.band(color, 0xFF000000), 24) * (opacity or 1))
-    local r = bit.rshift(bit.band(color, 0x00FF0000), 16) / 255
-    local g = bit.rshift(bit.band(color, 0x0000FF00), 8) / 255
-    local b = bit.band(color, 0x000000FF) / 255
-    local line_color = imgui.GetColorU32({ r, g, b, alpha / 255 })
-
-    local dash_len = 4
-    local gap_len = 4
-    local thickness = 2
-    -- Keep the stroke fully inside the slot so child/window clipping cannot cut it off.
+    local thickness = SEARCH_BORDER_THICKNESS
     local inset = thickness * 0.5
     x = x + inset
     y = y + inset
@@ -387,10 +367,14 @@ function M.draw_match_border_rect(draw_list, x, y, w, h, opacity)
         return
     end
 
-    draw_dashed_line(draw_list, x, y, x + w, y, line_color, thickness, dash_len, gap_len, anim_offset)
-    draw_dashed_line(draw_list, x + w, y, x + w, y + h, line_color, thickness, dash_len, gap_len, anim_offset)
-    draw_dashed_line(draw_list, x + w, y + h, x, y + h, line_color, thickness, dash_len, gap_len, anim_offset)
-    draw_dashed_line(draw_list, x, y + h, x, y, line_color, thickness, dash_len, gap_len, anim_offset)
+    draw_list:AddRect(
+        { x, y },
+        { x + w, y + h },
+        M.get_match_border_color_u32(opacity),
+        0,
+        0,
+        thickness
+    )
 end
 
 function M.draw_match_border(draw_list, x, y, size, opacity)
@@ -399,8 +383,8 @@ end
 
 -- Profile search (lua / xml gear profiles).
 local name_index = nil
-local profile_cache = {} -- path -> { size = n, ids = { [id] = true } }
-local query_cache = {} -- query_key -> ids set
+local profile_cache = {} -- path -> { size, ids }
+local query_cache = {} -- cache_key -> { resolved, path, size, ids }
 
 local function install_path()
     if not AshitaCore or not AshitaCore.GetInstallPath then
@@ -418,6 +402,22 @@ end
 
 local function lower(text)
     return trim(text):lower()
+end
+
+-- Strip trailing dots from partial filenames (e.g. "drg." -> "drg").
+local function normalize_profile_arg(arg)
+    if type(arg) ~= 'string' then
+        return nil
+    end
+    arg = trim(arg)
+    if arg == '' then
+        return nil
+    end
+    arg = arg:gsub('%.+$', '')
+    if arg == '' then
+        return nil
+    end
+    return arg
 end
 
 local function get_player_context()
@@ -485,9 +485,7 @@ function M.parse_query(query)
     if mode ~= 'lua' and mode ~= 'xml' then
         return nil, nil
     end
-    if rest == '' then
-        rest = nil
-    end
+    rest = normalize_profile_arg(rest)
     return mode, rest
 end
 
@@ -545,17 +543,26 @@ local function find_file_ci(dir, filename)
         return direct
     end
 
-    -- Case-insensitive scan of direct children only.
-    local entries = ashita.fs.get_directory(dir, '.*') or list_dirs(dir)
+    local entries = list_dirs(dir)
+    local prefix_match = nil
+    local prefix_len = math.huge
+    local allow_prefix = want:find('%.', 1, true) ~= nil
+
     for _, entry in ipairs(entries) do
-        if lower(entry) == want then
-            local path = dir .. entry
-            if file_exists(path) then
+        local entry_l = lower(entry)
+        local path = dir .. entry
+        if file_exists(path) then
+            if entry_l == want then
                 return path
+            end
+            if allow_prefix and entry_l:sub(1, #want) == want and #entry_l < prefix_len then
+                prefix_match = path
+                prefix_len = #entry_l
             end
         end
     end
-    return nil
+
+    return prefix_match
 end
 
 local function prefer_candidate(candidates)
@@ -873,6 +880,29 @@ local function load_profile_ids(path)
     return ids
 end
 
+local function lookup_query_cache(cache_key)
+    local cached = query_cache[cache_key]
+    if not cached or not cached.resolved then
+        return nil
+    end
+    if not cached.path then
+        return cached.ids or {}
+    end
+    if file_size(cached.path) == cached.size then
+        return cached.ids
+    end
+    return nil
+end
+
+local function store_query_cache(cache_key, path, ids)
+    query_cache[cache_key] = {
+        resolved = true,
+        path = path,
+        size = path and file_size(path) or 0,
+        ids = ids,
+    }
+end
+
 function M.get_match_ids(query)
     local mode, arg = M.parse_query(query)
     if not mode then
@@ -892,13 +922,9 @@ function M.get_match_ids(query)
         player.job_abbr,
     }, '\0')
 
-    local cached = query_cache[cache_key]
-    if cached then
-        -- Re-validate underlying file size cheaply.
-        local path = cached.path
-        if path and file_size(path) == cached.size then
-            return cached.ids
-        end
+    local cached_ids = lookup_query_cache(cache_key)
+    if cached_ids then
+        return cached_ids
     end
 
     local path
@@ -909,11 +935,7 @@ function M.get_match_ids(query)
     end
 
     local ids = load_profile_ids(path)
-    query_cache[cache_key] = {
-        path = path,
-        size = path and file_size(path) or 0,
-        ids = ids,
-    }
+    store_query_cache(cache_key, path, ids)
     return ids
 end
 

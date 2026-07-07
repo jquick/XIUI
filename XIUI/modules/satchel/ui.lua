@@ -30,6 +30,8 @@ end
 local COLOR_SLOT_BG = { 0.098, 0.090, 0.075, 1.0 }
 local COLOR_SLOT_LOCKED_BG = { 0.055, 0.050, 0.045, 1.0 }
 local DIM_SEARCH = 0.3
+local DIM_SEARCH_MATCH_INNER = 0.7
+local SEARCH_MATCH_INNER_DIM_PX = 2
 local COLOR_QTY = { 0.99, 0.95, 0.75, 1.0 }
 local COLOR_MISSING_ICON = { 0.9, 0.82, 0.50, 1.0 }
 local COLOR_EMPTY_TEXT = { 0.75, 0.75, 0.75, 1.0 }
@@ -190,8 +192,29 @@ end
 
 local function get_content_avail_width()
     local avail = imgui.GetContentRegionAvail()
+    if type(avail) == 'table' then
+        return tonumber(avail[1] or avail.x) or 0
+    end
     if type(avail) == 'number' then
         return avail
+    end
+    return 0
+end
+
+local function get_content_avail_height()
+    local avail = imgui.GetContentRegionAvail()
+    if type(avail) == 'table' then
+        return tonumber(avail[2] or avail.y) or 0
+    end
+    local h = select(2, imgui.GetContentRegionAvail())
+    if type(h) == 'number' then
+        return h
+    end
+
+    local win_h = imgui.GetWindowHeight()
+    local cursor_y = imgui.GetCursorPosY()
+    if type(win_h) == 'number' and type(cursor_y) == 'number' then
+        return math.max(0, win_h - cursor_y - ui.scaled(10, ui.get_global_scale()))
     end
     return 0
 end
@@ -209,19 +232,69 @@ local function center_cursor_for_width(width)
     imgui.SetCursorPosX(math.max(0, (get_full_content_width() - width) * 0.5))
 end
 
-local function get_content_avail_height()
-    local h = select(2, imgui.GetContentRegionAvail())
-    if type(h) == 'number' then
-        return h
-    end
+local function measure_footer_button_height(scale)
+    scale = scale or ui.get_global_scale()
+    ui.push_tab_button_style()
+    local frame_h = imgui.GetFrameHeight()
+    ui.pop_tab_button_style()
+    frame_h = (type(frame_h) == 'number' and frame_h > 0) and frame_h or ui.scaled(22, scale)
+    local style = imgui.GetStyle()
+    local border = (tonumber(style and style.FrameBorderSize) or 0) * 2
+    return frame_h + border
+end
 
-    local win_h = imgui.GetWindowHeight()
-    local cursor_y = imgui.GetCursorPosY()
-    if type(win_h) == 'number' and type(cursor_y) == 'number' then
-        return math.max(0, win_h - cursor_y - ui.scaled(10, ui.get_global_scale()))
-    end
+local function begin_footer_row(scale)
+    scale = scale or ui.get_global_scale()
+    local row_h = ui.get_footer_row_height(scale)
+    imgui.PushStyleVar(ImGuiStyleVar_WindowPadding, { 0, 0 })
+    ui.begin_child('##satchel_footer_row', { 0, row_h }, false, ui.NO_SCROLL_CHILD_FLAGS)
 
-    return ui.scaled(100, ui.get_global_scale())
+    local line_h = imgui.GetTextLineHeight()
+    line_h = (type(line_h) == 'number' and line_h > 0) and line_h or ui.scaled(14, scale)
+    local btn_h = measure_footer_button_height(scale)
+    local margin = 2
+    local button_y = math.max(0, row_h - btn_h - margin)
+    local text_y = math.max(0, (row_h - line_h) * 0.5)
+
+    return {
+        text_y = text_y,
+        button_y = button_y,
+        button_h = btn_h,
+        line_h = line_h,
+    }
+end
+
+local function end_footer_row()
+    ui.end_child()
+    imgui.PopStyleVar()
+end
+
+local function set_footer_line_cursor(x, y)
+    if type(x) == 'number' and type(y) == 'number' then
+        imgui.SetCursorPos({ x, y })
+    end
+end
+
+local function footer_sidebar_left_x(sidebar_width, gap)
+    local left_x = imgui.GetCursorPosX()
+    if sidebar_width > 0 then
+        return left_x + sidebar_width + gap
+    end
+    return left_x
+end
+
+local function footer_centered_block_left_x(block_width)
+    if not block_width or block_width <= 0 then
+        return imgui.GetCursorPosX()
+    end
+    return math.max(0, (get_full_content_width() - block_width) * 0.5)
+end
+
+local function footer_align_right_in_block(left_x, block_width, right_width)
+    if block_width and block_width > 0 then
+        return left_x + block_width - right_width
+    end
+    return math.max(0, get_full_content_width() - right_width)
 end
 
 local function blend_slot_background(base_bg, highlight_color, strength)
@@ -277,6 +350,73 @@ local function dim_color(color, factor)
     }
 end
 
+local function color_to_u32(color)
+    if type(color) == 'number' then
+        return color
+    end
+    return imgui.GetColorU32(color)
+end
+
+local function icon_tint_u32(alpha)
+    alpha = alpha or 1
+    return imgui.GetColorU32({ alpha, alpha, alpha, 1.0 })
+end
+
+local idle_grid_chrome = nil
+local search_grid_chrome = nil
+
+local function build_idle_grid_chrome()
+    if idle_grid_chrome then
+        return idle_grid_chrome
+    end
+
+    idle_grid_chrome = {
+        slot_bg_u32 = imgui.GetColorU32(COLOR_SLOT_BG),
+        locked_bg_u32 = imgui.GetColorU32(COLOR_SLOT_LOCKED_BG),
+        locked_border_u32 = imgui.GetColorU32(dim_color(satchelcolors.get_locked_slot_border(), 0.5)),
+        empty_border_u32 = imgui.GetColorU32(satchelcolors.get_empty_slot_border()),
+        icon_full_u32 = icon_tint_u32(1.0),
+        icon_locked_u32 = icon_tint_u32(0.35),
+        qty_u32 = imgui.GetColorU32(COLOR_QTY),
+        missing_icon_u32 = imgui.GetColorU32(COLOR_MISSING_ICON),
+    }
+    return idle_grid_chrome
+end
+
+local function build_search_grid_chrome()
+    if search_grid_chrome then
+        return search_grid_chrome
+    end
+
+    search_grid_chrome = {
+        slot_bg_u32 = imgui.GetColorU32(COLOR_SLOT_BG),
+        locked_bg_u32 = imgui.GetColorU32(COLOR_SLOT_LOCKED_BG),
+        locked_border_u32 = imgui.GetColorU32(dim_color(satchelcolors.get_locked_slot_border(), 0.5)),
+        empty_border_u32 = imgui.GetColorU32(satchelcolors.get_empty_slot_border()),
+        icon_full_u32 = icon_tint_u32(1.0),
+        icon_locked_u32 = icon_tint_u32(0.35),
+        qty_u32 = imgui.GetColorU32(COLOR_QTY),
+        missing_icon_u32 = imgui.GetColorU32(COLOR_MISSING_ICON),
+        search_dim_slot_bg_u32 = imgui.GetColorU32(dim_color(COLOR_SLOT_BG, DIM_SEARCH)),
+        search_dim_locked_bg_u32 = imgui.GetColorU32(dim_color(COLOR_SLOT_LOCKED_BG, DIM_SEARCH)),
+        search_dim_border_u32 = imgui.GetColorU32(dim_color(satchelcolors.get_empty_slot_border(), DIM_SEARCH)),
+        search_dim_locked_border_u32 = imgui.GetColorU32(
+            dim_color(dim_color(satchelcolors.get_locked_slot_border(), 0.5), DIM_SEARCH)
+        ),
+        icon_search_dim_u32 = icon_tint_u32(DIM_SEARCH),
+        icon_locked_search_dim_u32 = icon_tint_u32(0.35 * DIM_SEARCH),
+        qty_search_dim_u32 = imgui.GetColorU32(dim_color(COLOR_QTY, DIM_SEARCH)),
+        missing_icon_search_dim_u32 = imgui.GetColorU32(dim_color(COLOR_MISSING_ICON, DIM_SEARCH)),
+        search_match_border_u32 = searchlogic.get_match_border_color_u32(1.0),
+        search_match_inner_dim_u32 = searchlogic.get_match_inner_dim_u32(DIM_SEARCH_MATCH_INNER),
+    }
+    return search_grid_chrome
+end
+
+local function attach_grid_chrome(ctx)
+    ctx.chrome = ctx.search_active and build_search_grid_chrome() or build_idle_grid_chrome()
+end
+
 local function get_text_width(text, fallback)
     local width = imgui.CalcTextSize(text)
     if type(width) == 'number' then
@@ -298,6 +438,8 @@ end
 
 function ui.push_config_window_style()
     components.PushWindowStyle()
+    -- Let the main window background show through grid/tab/footer child regions.
+    imgui.PushStyleColor(ImGuiCol_ChildBg, { 0, 0, 0, 0 })
     local s = components.TAB_STYLE
     imgui.PushStyleColor(ImGuiCol_ScrollbarBg, s.bgMedium)
     imgui.PushStyleColor(ImGuiCol_ScrollbarGrab, s.bgLight)
@@ -310,6 +452,7 @@ end
 function ui.pop_config_window_style()
     imgui.PopStyleVar(2)
     imgui.PopStyleColor(4)
+    imgui.PopStyleColor(1)
     components.PopWindowStyle()
 end
 
@@ -338,7 +481,7 @@ local function draw_outlined_text(draw_list, x, y, text, color, outline_px)
 
     outline_px = outline_px or 1
     local outline = imgui.GetColorU32({ 0.0, 0.0, 0.0, 1.0 })
-    local fill = imgui.GetColorU32(color or COLOR_QTY)
+    local fill = color_to_u32(color or COLOR_QTY)
 
     for _, offset in ipairs({ { -1, 0 }, { 1, 0 }, { 0, -1 }, { 0, 1 } }) do
         draw_list:AddText(
@@ -348,27 +491,6 @@ local function draw_outlined_text(draw_list, x, y, text, color, outline_px)
         )
     end
     draw_list:AddText({ x, y }, fill, text)
-end
-
-local function get_window_padding_x()
-    local pad = imgui.GetStyle().WindowPadding
-    if type(pad) == 'table' then
-        return tonumber(pad[1] or pad.x) or 0
-    end
-    return tonumber(pad) or 0
-end
-
-local function get_window_content_right_x()
-    local window_w = tonumber(imgui.GetWindowWidth()) or 0
-    return math.max(0, window_w - get_window_padding_x())
-end
-
-local function get_window_content_left_x()
-    local region_min = imgui.GetWindowContentRegionMin()
-    if type(region_min) == 'table' then
-        return tonumber(region_min[1] or region_min.x) or get_window_padding_x()
-    end
-    return get_window_padding_x()
 end
 
 local function get_layout_columns(settings)
@@ -407,13 +529,6 @@ local function get_slots_for_grid(slots, settings)
         return slots or {}
     end
     return filter_display_slots(slots)
-end
-
-local function normalize_search_query(query)
-    if type(query) ~= 'string' then
-        return ''
-    end
-    return (query:match('^%s*(.-)%s*$') or '')
 end
 
 local function measure_toolbar_button_width(label)
@@ -477,7 +592,7 @@ local function render_toolbar_buttons_right_aligned(buttons, widths, right_x, ga
         local participates = highlight_ids and highlight_ids[button.id] ~= nil
         local is_match = participates and highlight_ids[button.id] == true
         -- Dim from highlight_ids alone so chrome (e.g. slips) can use a different
-        -- query than the toolbar's own Search/Cancel active state.
+        -- query than the toolbar search field state.
         local dim_button = participates and not is_match and not is_dragging
         local btn_size = (width > 0) and { width, 0 } or nil
         local clicked
@@ -546,25 +661,7 @@ function ui.render_toolbar_with_search(search_buffer, scale, id_suffix, buttons,
     id_suffix = tostring(id_suffix or 'main')
 
     local gap = ui.scaled(8, scale)
-    local active_search_text = normalize_search_query(opts.active_search_text or '')
-    local draft_text = (type(search_buffer) == 'table' and search_buffer[1]) or ''
-    local draft_normalized = normalize_search_query(draft_text)
-    local has_active_search = opts.search_active == true or active_search_text ~= ''
-    local draft_differs = draft_normalized ~= active_search_text
-    local show_cancel = has_active_search and active_search_text ~= '' and not draft_differs
-    -- Reserve the wider of Search/Cancel so the field width does not jump on toggle.
-    local action_width = math.max(
-        measure_toolbar_button_width(('Search##satchel_search_go_%s'):format(id_suffix)),
-        measure_toolbar_button_width(('Cancel##satchel_search_go_%s'):format(id_suffix))
-    )
-    local action_button = {
-        id = show_cancel and 'cancel' or 'search',
-        label = show_cancel
-            and ('Cancel##satchel_search_go_%s'):format(id_suffix)
-            or ('Search##satchel_search_go_%s'):format(id_suffix),
-        enabled = show_cancel or draft_text ~= '',
-    }
-    local visible_buttons = { action_button }
+    local visible_buttons = {}
     for _, button in ipairs(buttons) do
         if button.visible ~= false then
             visible_buttons[#visible_buttons + 1] = button
@@ -579,17 +676,14 @@ function ui.render_toolbar_with_search(search_buffer, scale, id_suffix, buttons,
     local line_start_x = imgui.GetCursorPosX()
     local line_y = imgui.GetCursorPosY()
     local buttons_w, button_widths = measure_toolbar_button_group(visible_buttons, gap)
-    button_widths[1] = action_width
-    buttons_w = action_width
-    for index = 2, #visible_buttons do
-        buttons_w = buttons_w + gap + (button_widths[index] or 0)
-    end
     local button_gap = (#visible_buttons > 0) and gap or 0
     local search_w = math.max(ui.scaled(80, scale), align_width - buttons_w - button_gap)
-    local enter_pressed, input_focused = ui.render_search_bar(search_buffer, search_w, scale, id_suffix)
-    if not show_cancel then
-        action_button.enabled = draft_text ~= ''
-    end
+    local input_focused = ui.render_search_bar(
+        search_buffer,
+        search_w,
+        scale,
+        id_suffix
+    )
 
     local clicks = render_toolbar_buttons_right_aligned(
         visible_buttons,
@@ -601,13 +695,6 @@ function ui.render_toolbar_with_search(search_buffer, scale, id_suffix, buttons,
         opts.search_active == true,
         opts.is_dragging == true
     )
-    if enter_pressed then
-        if draft_text ~= '' then
-            clicks.search = true
-        elseif show_cancel then
-            clicks.cancel = true
-        end
-    end
 
     return clicks, input_focused == true
 end
@@ -615,49 +702,34 @@ end
 function ui.render_search_bar(buffer, width, scale, id_suffix)
     scale = scale or ui.get_global_scale()
     if type(buffer) ~= 'table' then
-        return false, false
+        return false
     end
 
     local widget_id = ('##satchel_search_%s'):format(tostring(id_suffix or 'main'))
-    local enter_flag = ImGuiInputTextFlags_EnterReturnsTrue or 0
-    local submitted = false
     imgui.PushStyleColor(ImGuiCol_FrameBg, { 0.067, 0.063, 0.055, 0.95 })
     imgui.PushStyleColor(ImGuiCol_FrameBgHovered, COLOR_HOVER)
     imgui.PushStyleColor(ImGuiCol_FrameBgActive, COLOR_IDLE)
     imgui.PushItemWidth(width or ui.scaled(180, scale))
-    local ok, result = pcall(imgui.InputTextWithHint, widget_id, 'Search items...', buffer, 64, enter_flag)
-    if ok then
-        submitted = result == true
-    else
+    local ok, _ = pcall(imgui.InputTextWithHint, widget_id, 'Search items...', buffer, 64, 0)
+    if not ok then
         local fallback_id = ('Search%s'):format(widget_id)
-        local ok_fallback, fallback_result = pcall(imgui.InputText, fallback_id, buffer, 64, enter_flag)
-        if ok_fallback then
-            submitted = fallback_result == true
-        else
+        local ok_fallback = pcall(imgui.InputText, fallback_id, buffer, 64, 0)
+        if not ok_fallback then
             imgui.InputText(fallback_id, buffer, 64)
         end
     end
     imgui.PopItemWidth()
     imgui.PopStyleColor(3)
 
-    -- Enter deactivates the field in the same frame; treat submit as still focused
-    -- so callers can arm the Enter-block trail before the game sees the key.
-    local input_focused = submitted == true
-    if not input_focused then
-        local active_ok, is_active = pcall(function()
-            return imgui.IsItemActive()
-        end)
-        if active_ok and is_active then
-            input_focused = true
-        else
-            local focused_ok, is_focused = pcall(function()
-                return imgui.IsItemFocused()
-            end)
-            input_focused = focused_ok and is_focused == true
-        end
-    end
+    local active_ok, is_active = pcall(function()
+        return imgui.IsItemActive()
+    end)
+    local focused_ok, is_focused = pcall(function()
+        return imgui.IsItemFocused()
+    end)
+    local field_active = (active_ok and is_active == true) or (focused_ok and is_focused == true)
 
-    return submitted, input_focused
+    return field_active
 end
 
 local function draw_full_badge(max_x, min_y, max_y)
@@ -857,9 +929,8 @@ function ui.get_footer_row_height(scale)
     scale = scale or ui.get_global_scale()
     local text_h = imgui.GetTextLineHeight()
     text_h = type(text_h) == 'number' and text_h or ui.scaled(14, scale)
-    local frame_h = imgui.GetFrameHeight()
-    frame_h = type(frame_h) == 'number' and frame_h or ui.scaled(22, scale)
-    return math.max(text_h, frame_h, ui.scaled(24, scale))
+    local btn_h = measure_footer_button_height(scale)
+    return math.max(text_h, btn_h + 4, ui.scaled(30, scale))
 end
 
 function ui.render_inventory_footer(stat, ctx, opts)
@@ -868,20 +939,22 @@ function ui.render_inventory_footer(stat, ctx, opts)
     local sidebar_width = opts.sidebar_width or 0
     local gap = opts.gap or ui.scaled(8, scale)
 
+    local layout = begin_footer_row(scale)
+
     local used = (stat and stat.used) or 0
     local total = (stat and stat.total) or 0
-
-    if sidebar_width > 0 then
-        imgui.SetCursorPosX(imgui.GetCursorPosX() + sidebar_width + gap)
-    end
+    local left_x = footer_sidebar_left_x(sidebar_width, gap)
+    set_footer_line_cursor(left_x, layout.text_y)
     imgui.TextColored(COLOR_USED_TEXT, ('Used: %d / %d'):format(used, total))
 
     if not ctx or not ctx.get_gil_amount or not ctx.format_gil_text or ctx.hide_gil then
+        end_footer_row()
         return
     end
 
     local gil_amount = ctx.get_gil_amount()
     if gil_amount == nil then
+        end_footer_row()
         return
     end
 
@@ -899,8 +972,9 @@ function ui.render_inventory_footer(stat, ctx, opts)
             or (ctx.tex_ptr and ctx.tex_ptr(gil_icon) or nil)
     end
     local right_width = text_w + (gil_ptr and (icon_size + icon_gap) or 0)
-    local right_x = math.max(0, get_full_content_width() - right_width)
-    imgui.SameLine(right_x)
+    local grid_block_width = tonumber(opts.grid_block_width) or 0
+    local right_x = footer_align_right_in_block(left_x, grid_block_width, right_width)
+    set_footer_line_cursor(right_x, layout.text_y)
 
     if gil_ptr then
         imgui.Image(gil_ptr, { icon_size, icon_size })
@@ -908,88 +982,161 @@ function ui.render_inventory_footer(stat, ctx, opts)
     end
 
     imgui.TextColored(COLOR_GIL_TEXT, gil_text)
+    end_footer_row()
+end
+
+local function render_footer_pagination(page_index, page_count, on_page_change, scale, layout, opts)
+    opts = opts or {}
+    scale = scale or ui.get_global_scale()
+    local page = tonumber(page_index) or 0
+    local total_pages = math.max(1, tonumber(page_count) or 1)
+    local gap = opts.gap or ui.scaled(8, scale)
+    local page_text = ('Page %d / %d'):format(page + 1, total_pages)
+    local grid_width = tonumber(opts.grid_width) or 0
+    local left_x = footer_centered_block_left_x(grid_width)
+    local right_inset = tonumber(opts.right_inset) or ui.scaled(2, scale)
+    local prev_w = measure_toolbar_button_width('Prev##satchel_slip_page')
+    local next_w = measure_toolbar_button_width('Next##satchel_slip_page')
+    local page_w = get_text_width(page_text, 0)
+    local page_text_y = layout.button_y + math.max(0, (layout.button_h - layout.line_h) * 0.5)
+    local btn_size = { 0, layout.button_h }
+    local grid_right = left_x + grid_width
+
+    local x = grid_right - right_inset - next_w
+    btn_size[1] = next_w
+    set_footer_line_cursor(x, layout.button_y)
+    if ui.render_toolbar_button('Next##satchel_slip_page', page < (total_pages - 1), btn_size) and on_page_change then
+        on_page_change(page + 1)
+    end
+
+    x = x - gap - page_w
+    set_footer_line_cursor(x, page_text_y)
+    imgui.TextColored(COLOR_USED_TEXT, page_text)
+
+    x = x - gap - prev_w
+    btn_size[1] = prev_w
+    set_footer_line_cursor(x, layout.button_y)
+    if ui.render_toolbar_button('Prev##satchel_slip_page', page > 0, btn_size) and on_page_change then
+        on_page_change(page - 1)
+    end
 end
 
 function ui.render_slip_window_footer(stored_count, page_index, page_count, on_page_change, scale, opts)
     opts = opts or {}
     scale = scale or ui.get_global_scale()
-    local page = tonumber(page_index) or 0
-    local total_pages = math.max(1, tonumber(page_count) or 1)
-    local can_prev = page > 0
-    local can_next = page < (total_pages - 1)
-    local gap = opts.gap or ui.scaled(8, scale)
     local stored_text = ('Stored: %d Items'):format(tonumber(stored_count) or 0)
-    local page_text = ('Page %d / %d'):format(page + 1, total_pages)
 
-    local grid_width = tonumber(opts.grid_width) or 0
-    local content_width = get_full_content_width()
-    local left_offset = 0
-    if grid_width > 0 then
-        left_offset = math.max(0, (content_width - grid_width) * 0.5)
-        imgui.SetCursorPosX(left_offset)
-    end
+    local layout = begin_footer_row(scale)
+    local left_x = footer_centered_block_left_x(tonumber(opts.grid_width) or 0)
+    set_footer_line_cursor(left_x, layout.text_y)
     imgui.TextColored(COLOR_USED_TEXT, stored_text)
-
-    local prev_w = measure_toolbar_button_width('Prev##satchel_slip_page')
-    local next_w = measure_toolbar_button_width('Next##satchel_slip_page')
-    local page_w = get_text_width(page_text, 0)
-    local right_width = prev_w + gap + page_w + gap + next_w
-    local right_x
-    if grid_width > 0 then
-        right_x = left_offset + grid_width - right_width
-    else
-        right_x = math.max(0, content_width - right_width)
-    end
-    imgui.SameLine(right_x)
-
-    if ui.render_toolbar_button('Prev##satchel_slip_page', can_prev) and on_page_change then
-        on_page_change(page - 1)
-    end
-    imgui.SameLine(0, gap)
-    imgui.TextColored(COLOR_USED_TEXT, page_text)
-    imgui.SameLine(0, gap)
-    if ui.render_toolbar_button('Next##satchel_slip_page', can_next) and on_page_change then
-        on_page_change(page + 1)
-    end
+    render_footer_pagination(page_index, page_count, on_page_change, scale, layout, opts)
+    end_footer_row()
 end
 
-local function draw_slot_icon(draw_list, tex_ptr, screen_x, screen_y, icon_size, icon_alpha)
-    if not draw_list or not tex_ptr or tex_ptr == 0 or icon_alpha <= 0.01 then
+local function grid_slot_screen_bounds(grid_ox, grid_oy, index, columns, slot_size, cell_gap)
+    local zero = index - 1
+    local col = zero % columns
+    local row = math.floor(zero / columns)
+    local cell = slot_size + cell_gap
+    local min_x = grid_ox + (col * cell)
+    local min_y = grid_oy + (row * cell)
+    return min_x, min_y, min_x + slot_size, min_y + slot_size
+end
+
+local function hit_test_grid_slot(mouse_x, mouse_y, grid_ox, grid_oy, columns, slot_size, cell_gap, slot_count)
+    if type(mouse_x) ~= 'number' or type(mouse_y) ~= 'number' then
+        return nil
+    end
+
+    local local_x = mouse_x - grid_ox
+    local local_y = mouse_y - grid_oy
+    if local_x < 0 or local_y < 0 then
+        return nil
+    end
+
+    local cell = slot_size + cell_gap
+    local col = math.floor(local_x / cell)
+    local row = math.floor(local_y / cell)
+    if col < 0 or col >= columns then
+        return nil
+    end
+
+    local in_cell_x = local_x - (col * cell)
+    local in_cell_y = local_y - (row * cell)
+    if in_cell_x > slot_size or in_cell_y > slot_size then
+        return nil
+    end
+
+    local index = (row * columns) + col + 1
+    if index < 1 or index > slot_count then
+        return nil
+    end
+    return index
+end
+
+local function draw_slot_icon(draw_list, tex_ptr, screen_x, screen_y, icon_size, tint_u32)
+    if not draw_list or not tex_ptr or tex_ptr == 0 or not tint_u32 then
         return
     end
 
-    local tint = imgui.GetColorU32({ icon_alpha, icon_alpha, icon_alpha, 1.0 })
     draw_list:AddImage(
         tex_ptr,
         { screen_x, screen_y },
         { screen_x + icon_size, screen_y + icon_size },
         { 0, 0 },
         { 1, 1 },
-        tint
+        tint_u32
     )
 end
 
-local function draw_slot(slot, index, key_prefix, ctx)
+-- Darken only the inner band of an icon so built-in icon borders do not wash out the gold highlight.
+local function draw_search_match_inner_dim(draw_list, x1, y1, x2, y2, band_px, dim_u32)
+    if not draw_list or not dim_u32 or band_px <= 0 then
+        return
+    end
+
+    if (x2 - x1) <= band_px or (y2 - y1) <= band_px then
+        return
+    end
+
+    draw_list:AddRectFilled({ x1, y1 }, { x2, y1 + band_px }, dim_u32)
+    draw_list:AddRectFilled({ x1, y2 - band_px }, { x2, y2 }, dim_u32)
+    draw_list:AddRectFilled({ x1, y1 }, { x1 + band_px, y2 }, dim_u32)
+    draw_list:AddRectFilled({ x2 - band_px, y1 }, { x2, y2 }, dim_u32)
+end
+
+local function draw_slot(slot, index, key_prefix, ctx, layout)
     local slot_size = ctx.slot_size or ctx.settings.slot_size
-    local icon_padding = math.max(1, math.floor(slot_size * 0.05))
-    local icon_size = math.max(20, slot_size - (icon_padding * 2))
+    local icon_padding = ctx.icon_padding or math.max(1, math.floor(slot_size * 0.05))
+    local icon_size = ctx.icon_size or math.max(20, slot_size - (icon_padding * 2))
     local locked = slot.locked == true
     local read_only = slot.read_only == true or ctx.read_only == true
     local allow_visual_drag = ctx.visual_sort_only == true
     local allow_drag = allow_visual_drag and not locked and slot.id and slot.id > 0
-    local search_query = normalize_search_query(ctx.search_query or '')
-    local search_active = search_query ~= ''
+    local is_dragging = ctx.grid_is_dragging == true
+    local search_active = ctx.search_active == true
     local search_match = false
     if search_active and slot.id and slot.id > 0 and ctx.item_matches_search then
-        search_match = ctx.item_matches_search(slot, search_query) == true
+        search_match = ctx.item_matches_search(slot, ctx.search_query) == true
     end
 
-    local border_color = locked and dim_color(satchelcolors.get_locked_slot_border(), 0.5) or ctx.get_slot_border_color(slot)
-    if not locked and (not slot.id or slot.id <= 0) then
-        border_color = satchelcolors.get_empty_slot_border()
+    local chrome = ctx.chrome
+    local border_u32
+    if search_active and search_match then
+        border_u32 = nil
+    elseif search_active and not is_dragging then
+        border_u32 = locked and chrome.search_dim_locked_border_u32 or chrome.search_dim_border_u32
+    elseif locked then
+        border_u32 = chrome.locked_border_u32
+    elseif not slot.id or slot.id <= 0 then
+        border_u32 = chrome.empty_border_u32
+    elseif ctx.get_slot_border_u32 then
+        border_u32 = ctx.get_slot_border_u32(slot)
+    else
+        border_u32 = color_to_u32(ctx.get_slot_border_color(slot))
     end
 
-    local is_dragging = ctx.is_dragging and ctx.is_dragging() == true
     local is_drag_source = is_dragging
         and ctx.is_drag_source
         and ctx.is_drag_source(slot) == true
@@ -1003,96 +1150,123 @@ local function draw_slot(slot, index, key_prefix, ctx)
     -- Dim non-matches while searching, including empty and locked slots.
     -- Suspend dimming during an active drag so the board is fully readable.
     local search_dim = search_active and not search_match and not is_dragging
-    local icon_alpha = 1.0
-    if locked then
-        icon_alpha = search_dim and (0.35 * DIM_SEARCH) or 0.35
-    elseif is_drag_source then
-        icon_alpha = 0.0
+    local icon_tint
+    if is_drag_source then
+        icon_tint = nil
+    elseif locked then
+        icon_tint = search_dim and chrome.icon_locked_search_dim_u32 or chrome.icon_locked_u32
     elseif search_dim then
-        icon_alpha = DIM_SEARCH
-    end
-    if search_dim then
-        border_color = dim_color(border_color, DIM_SEARCH)
+        icon_tint = chrome.icon_search_dim_u32
+    else
+        icon_tint = chrome.icon_full_u32
     end
 
     local tex = nil
-    local slot_id = ('##satchel_slot_%s_%d'):format(tostring(key_prefix or 'all'), index)
-    imgui.InvisibleButton(slot_id, { slot_size, slot_size })
+    local min_x, min_y, max_x, max_y
+    local slot_hovered = false
+    layout = layout or {}
+
+    if layout.min_x ~= nil then
+        min_x = layout.min_x
+        min_y = layout.min_y
+        max_x = layout.max_x
+        max_y = layout.max_y
+        slot_hovered = layout.is_hovered == true
+    else
+        local slot_id = ('##satchel_slot_%s_%d'):format(tostring(key_prefix or 'all'), index)
+        imgui.InvisibleButton(slot_id, { slot_size, slot_size })
+        slot_hovered = is_dragging and imgui.IsItemHovered(DRAG_HOVER_FLAGS) or imgui.IsItemHovered()
+        min_x, min_y = imgui.GetItemRectMin()
+        max_x, max_y = imgui.GetItemRectMax()
+    end
 
     local drag_source_hovered = is_dragging
         and is_drag_source
-        and imgui.IsItemHovered(DRAG_HOVER_FLAGS)
+        and slot_hovered
 
     local drop_target_hovered = is_dragging
         and not is_drag_source
         and (allow_visual_drag or not read_only)
         and not locked
-        and imgui.IsItemHovered(DRAG_HOVER_FLAGS)
+        and slot_hovered
 
-    local min_x, min_y = imgui.GetItemRectMin()
-    local max_x, max_y = imgui.GetItemRectMax()
     local draw_list = imgui.GetWindowDrawList()
-    local slot_bg = locked and COLOR_SLOT_LOCKED_BG or COLOR_SLOT_BG
+    local slot_bg_u32 = locked and chrome.locked_bg_u32 or chrome.slot_bg_u32
     if search_dim then
-        slot_bg = dim_color(slot_bg, DIM_SEARCH)
+        slot_bg_u32 = locked and chrome.search_dim_locked_bg_u32 or chrome.search_dim_slot_bg_u32
     end
 
     if is_drag_source then
-        slot_bg, border_color = apply_drag_slot_colors(slot_bg, false, false)
+        local drag_bg, drag_border = apply_drag_slot_colors(
+            locked and COLOR_SLOT_LOCKED_BG or COLOR_SLOT_BG,
+            false,
+            false
+        )
+        slot_bg_u32 = color_to_u32(drag_bg)
+        border_u32 = color_to_u32(drag_border)
     elseif is_dragging and (allow_visual_drag or not read_only) and not locked and is_empty_slot then
-        slot_bg, border_color = apply_drag_slot_colors(slot_bg, can_accept_drop, false)
+        local drag_bg, drag_border = apply_drag_slot_colors(
+            locked and COLOR_SLOT_LOCKED_BG or COLOR_SLOT_BG,
+            can_accept_drop,
+            false
+        )
+        slot_bg_u32 = color_to_u32(drag_bg)
+        border_u32 = color_to_u32(drag_border)
     end
 
     if drag_source_hovered then
-        slot_bg, border_color = apply_drag_slot_colors(slot_bg, false, true)
+        local drag_bg, drag_border = apply_drag_slot_colors(
+            locked and COLOR_SLOT_LOCKED_BG or COLOR_SLOT_BG,
+            false,
+            true
+        )
+        slot_bg_u32 = color_to_u32(drag_bg)
+        border_u32 = color_to_u32(drag_border)
     elseif drop_target_hovered then
-        slot_bg, border_color = apply_drag_slot_colors(slot_bg, can_accept_drop, true)
+        local drag_bg, drag_border = apply_drag_slot_colors(
+            locked and COLOR_SLOT_LOCKED_BG or COLOR_SLOT_BG,
+            can_accept_drop,
+            true
+        )
+        slot_bg_u32 = color_to_u32(drag_bg)
+        border_u32 = color_to_u32(drag_border)
     end
 
     if is_drag_source then
-        border_color = satchelcolors.get_drag_drop_invalid_highlight_hover()
+        border_u32 = color_to_u32(satchelcolors.get_drag_drop_invalid_highlight_hover())
     end
 
-    if (allow_drag or (not read_only and not locked)) and slot.id and slot.id > 0
-        and imgui.IsItemActive() and imgui.IsMouseDown(MOUSE_LEFT) then
+    if not layout.defer_interaction
+        and (allow_drag or (not read_only and not locked)) and slot.id and slot.id > 0
+        and ((layout.min_x == nil and imgui.IsItemActive()) or slot_hovered)
+        and imgui.IsMouseDown(MOUSE_LEFT) then
         block_window_move = true
     end
 
     if draw_list and type(min_x) == 'number' and type(min_y) == 'number'
         and type(max_x) == 'number' and type(max_y) == 'number' then
-        draw_list:AddRectFilled({ min_x, min_y }, { max_x, max_y }, imgui.GetColorU32(slot_bg))
+        draw_list:AddRectFilled({ min_x, min_y }, { max_x, max_y }, slot_bg_u32)
 
-        -- Search matches use the ant border in place of the solid slot border
-        -- (drawn on the slot's window list so tooltips stay on top).
-        local use_ant_border = search_match and not is_drag_source
-        if use_ant_border then
-            searchlogic.draw_match_border_rect(
-                draw_list,
-                min_x,
-                min_y,
-                max_x - min_x,
-                max_y - min_y,
-                1.0
-            )
-        else
-            draw_list:AddRect({ min_x, min_y }, { max_x, max_y }, imgui.GetColorU32(border_color), 0, 0, 1.0)
+        local use_match_border = search_match and not is_drag_source
+        if not use_match_border and border_u32 then
+            draw_list:AddRect({ min_x, min_y }, { max_x, max_y }, border_u32, 0, 0, 1.0)
         end
 
         if slot.id and slot.id > 0 then
             tex = ctx.load_item_icon(slot.id)
-            if tex then
+            if tex and icon_tint then
                 draw_slot_icon(
                     draw_list,
                     ctx.tex_ptr(tex),
                     min_x + icon_padding,
                     min_y + icon_padding,
                     icon_size,
-                    icon_alpha
+                    icon_tint
                 )
-            else
+            elseif not tex then
                 draw_list:AddText(
                     { min_x + 4, min_y + 8 },
-                    imgui.GetColorU32(dim_color(COLOR_MISSING_ICON, icon_alpha)),
+                    search_dim and chrome.missing_icon_search_dim_u32 or chrome.missing_icon_u32,
                     '?'
                 )
             end
@@ -1111,8 +1285,40 @@ local function draw_slot(slot, index, key_prefix, ctx)
                     qty_x,
                     qty_y,
                     qty_text,
-                    dim_color(COLOR_QTY, icon_alpha),
+                    search_dim and chrome.qty_search_dim_u32 or chrome.qty_u32,
                     outline_px
+                )
+            end
+        end
+
+        if use_match_border and slot.id and slot.id > 0 and chrome.search_match_inner_dim_u32 then
+            local ix = min_x + icon_padding
+            local iy = min_y + icon_padding
+            draw_search_match_inner_dim(
+                draw_list,
+                ix,
+                iy,
+                ix + icon_size,
+                iy + icon_size,
+                SEARCH_MATCH_INNER_DIM_PX,
+                chrome.search_match_inner_dim_u32
+            )
+        end
+
+        -- Search highlight on top of icon so built-in icon borders do not obscure it.
+        if use_match_border and chrome.search_match_border_u32 then
+            local thickness = 2
+            local inset = thickness * 0.5
+            local bx, by = min_x + inset, min_y + inset
+            local bw, bh = (max_x - min_x) - thickness, (max_y - min_y) - thickness
+            if bw > 0 and bh > 0 then
+                draw_list:AddRect(
+                    { bx, by },
+                    { bx + bw, by + bh },
+                    chrome.search_match_border_u32,
+                    0,
+                    0,
+                    thickness
                 )
             end
         end
@@ -1122,7 +1328,10 @@ local function draw_slot(slot, index, key_prefix, ctx)
         ctx.pending_drop_target = slot
     end
 
-    local slot_hovered = is_dragging and imgui.IsItemHovered(DRAG_HOVER_FLAGS) or imgui.IsItemHovered()
+    if layout.defer_interaction then
+        return
+    end
+
     if not locked and slot_hovered and slot.id and slot.id > 0 and ctx.render_item_detail_tooltip then
         local ok, err = pcall(ctx.render_item_detail_tooltip, slot)
         if not ok and ashita and ashita.log and ashita.log.error then
@@ -1142,7 +1351,48 @@ local function draw_slot(slot, index, key_prefix, ctx)
     end
 
     if not read_only and not locked and slot.id and slot.id > 0 and ctx.on_slot_double_click
-        and imgui.IsItemHovered() and imgui.IsMouseDoubleClicked(MOUSE_LEFT) then
+        and slot_hovered and imgui.IsMouseDoubleClicked(MOUSE_LEFT) then
+        ctx.on_slot_double_click(slot)
+    end
+end
+
+local function handle_fast_grid_slot_interactions(slot, ctx, grid_hovered, grid_active, hovered_idx)
+    if not grid_hovered or not hovered_idx or not slot then
+        return
+    end
+
+    local locked = slot.locked == true
+    local read_only = slot.read_only == true or ctx.read_only == true
+    local allow_visual_drag = ctx.visual_sort_only == true
+    local allow_drag = allow_visual_drag and not locked and slot.id and slot.id > 0
+
+    if grid_active
+        and (allow_drag or (not read_only and not locked)) and slot.id and slot.id > 0
+        and imgui.IsMouseDown(MOUSE_LEFT) then
+        block_window_move = true
+    end
+
+    if not locked and slot.id and slot.id > 0 and ctx.render_item_detail_tooltip and not ctx.grid_is_dragging then
+        local ok, err = pcall(ctx.render_item_detail_tooltip, slot)
+        if not ok and ashita and ashita.log and ashita.log.error then
+            ashita.log.error(('[XIUI Satchel] tooltip error: %s'):format(tostring(err)))
+        end
+    end
+
+    if (allow_visual_drag or not read_only) and not locked and slot.id and slot.id > 0
+        and imgui.IsItemClicked(MOUSE_RIGHT) and ctx.on_slot_right_click then
+        ctx.on_slot_right_click(slot)
+    end
+
+    if allow_drag and ctx.on_slot_drag_start and imgui.IsItemClicked(MOUSE_LEFT) then
+        pending_drag = { scope = ctx.drag_scope, slot = slot, item_id = slot.id }
+    elseif not read_only and not locked and slot.id and slot.id > 0 and ctx.on_slot_drag_start
+        and imgui.IsItemClicked(MOUSE_LEFT) then
+        pending_drag = { scope = ctx.drag_scope, slot = slot, item_id = slot.id }
+    end
+
+    if not read_only and not locked and slot.id and slot.id > 0 and ctx.on_slot_double_click
+        and imgui.IsMouseDoubleClicked(MOUSE_LEFT) then
         ctx.on_slot_double_click(slot)
     end
 end
@@ -1216,7 +1466,16 @@ function ui.render_slot_grid(slots, key_prefix, stat, ctx)
     local scale = ctx.scale or ui.get_global_scale()
     ctx.scale = scale
     ctx.slot_size = ui.scaled(ctx.settings.slot_size or ctx.default_slot_size or 40, scale)
+    ctx.icon_padding = math.max(1, math.floor(ctx.slot_size * 0.05))
+    ctx.icon_size = math.max(20, ctx.slot_size - (ctx.icon_padding * 2))
+    ctx.grid_is_dragging = ctx.is_dragging and ctx.is_dragging() == true
     block_window_move = false
+
+    ctx.search_active = ctx.search_active == true
+    attach_grid_chrome(ctx)
+    if ctx.prepare_slot_render then
+        ctx.prepare_slot_render()
+    end
 
     local packed = get_slots_for_grid(slots, ctx.settings)
     local packed_count = #packed
@@ -1236,10 +1495,70 @@ function ui.render_slot_grid(slots, key_prefix, stat, ctx)
         metrics.needs_scroll and 0 or SLOT_CHILD_FLAGS
     )
 
-    for i = 1, packed_count do
-        draw_slot(packed[i], i, tostring(key_prefix), ctx)
-        if i % metrics.columns ~= 0 then
-            imgui.SameLine(0, metrics.cell_gap)
+    local key = tostring(key_prefix)
+    local use_fast_grid = not metrics.needs_scroll and packed_count > 0
+    local grid_ox, grid_oy
+    local hovered_idx = nil
+
+    if use_fast_grid then
+        grid_ox, grid_oy = imgui.GetCursorScreenPos()
+        imgui.InvisibleButton(
+            ('##satchel_grid_hit_%s'):format(key),
+            { metrics.grid_width, metrics.grid_height }
+        )
+        local grid_hovered = imgui.IsItemHovered()
+        local grid_active = imgui.IsItemActive()
+
+        if grid_hovered then
+            local mouse_x, mouse_y = imgui.GetMousePos()
+            hovered_idx = hit_test_grid_slot(
+                mouse_x,
+                mouse_y,
+                grid_ox,
+                grid_oy,
+                metrics.columns,
+                metrics.slot_size,
+                metrics.cell_gap,
+                packed_count
+            )
+        end
+
+        for i = 1, packed_count do
+            local min_x, min_y, max_x, max_y = grid_slot_screen_bounds(
+                grid_ox,
+                grid_oy,
+                i,
+                metrics.columns,
+                metrics.slot_size,
+                metrics.cell_gap
+            )
+            draw_slot(packed[i], i, key, ctx, {
+                min_x = min_x,
+                min_y = min_y,
+                max_x = max_x,
+                max_y = max_y,
+                is_hovered = grid_hovered and hovered_idx == i,
+                defer_interaction = true,
+            })
+        end
+
+        if hovered_idx then
+            handle_fast_grid_slot_interactions(
+                packed[hovered_idx],
+                ctx,
+                grid_hovered,
+                grid_active,
+                hovered_idx
+            )
+        elseif grid_active and imgui.IsMouseDown(MOUSE_LEFT) then
+            block_window_move = true
+        end
+    else
+        for i = 1, packed_count do
+            draw_slot(packed[i], i, key, ctx)
+            if i % metrics.columns ~= 0 then
+                imgui.SameLine(0, metrics.cell_gap)
+            end
         end
     end
 
@@ -1255,8 +1574,7 @@ function ui.render_slot_grid(slots, key_prefix, stat, ctx)
 
     if ctx.pending_drop_target
         and ctx.on_drop_to_slot
-        and ctx.is_dragging
-        and ctx.is_dragging() == true
+        and ctx.grid_is_dragging
         and ctx.can_drop_to_slot
         and ctx.can_drop_to_slot(ctx.pending_drop_target) == true
         and imgui.IsMouseReleased(MOUSE_LEFT) then

@@ -1,4 +1,5 @@
 local breader = require('bitreader')
+local imgui = require('imgui')
 local TextureManager = require('libs.texturemanager')
 local tooltips = require('modules.satchel.tooltips')
 local satchelfontcore = require('modules.satchel.satchelfontcore')
@@ -190,6 +191,10 @@ local function create_item_logic(ctx)
     local description_text_cache = {}
     local slot_augment_cache = {}
     local tooltip_sections_cache = {}
+    local border_u32_cache = {}
+    local border_u32_cache_gen = -1
+    local equipped_lookup_gen = -1
+    local equipped_lookup = {}
 
     function M.clear_caches()
         satchel.names = {}
@@ -199,6 +204,48 @@ local function create_item_logic(ctx)
         description_text_cache = {}
         slot_augment_cache = {}
         tooltip_sections_cache = {}
+        border_u32_cache = {}
+        border_u32_cache_gen = -1
+        equipped_lookup_gen = -1
+        equipped_lookup = {}
+    end
+
+    function M.ensure_equipped_lookup()
+        local gen = satchel.search.match_inv_gen or 0
+        if equipped_lookup_gen == gen then
+            return
+        end
+
+        equipped_lookup_gen = gen
+        equipped_lookup = {}
+
+        local inv = AshitaCore:GetMemoryManager():GetInventory()
+        if not inv then
+            return
+        end
+
+        for equip_slot = 0, 15 do
+            local equipped = inv:GetEquippedItem(equip_slot)
+            if equipped and equipped.Index then
+                local raw_index = tonumber(equipped.Index) or 0
+                local equipped_index = bit.band(raw_index, 0x00FF)
+                if equipped_index > 0 then
+                    local equipped_container = bit.rshift(bit.band(raw_index, 0xFF00), 8)
+                    equipped_lookup[('%d:%d'):format(equipped_container, equipped_index)] = true
+                end
+            end
+        end
+    end
+
+    local function search_slot_key(slot)
+        if type(slot) ~= 'table' then
+            return nil
+        end
+        return ('%s:%s:%s'):format(
+            tostring(slot.container_id or ''),
+            tostring(slot.slot_index or ''),
+            tostring(slot.id or 0)
+        )
     end
 
     function M.get_item_type(item_id)
@@ -654,31 +701,13 @@ local function create_item_logic(ctx)
             return false
         end
 
-        local inv = AshitaCore:GetMemoryManager():GetInventory()
-        if not inv then
-            return false
-        end
-
         local target_property_index = tonumber(slot.property_index)
         if target_property_index == nil or target_property_index <= 0 then
             return false
         end
 
-        for equip_slot = 0, 15 do
-            local equipped = inv:GetEquippedItem(equip_slot)
-            if equipped and equipped.Index then
-                local raw_index = tonumber(equipped.Index) or 0
-                local equipped_index = bit.band(raw_index, 0x00FF)
-                if equipped_index > 0 then
-                    local equipped_container = bit.rshift(bit.band(raw_index, 0xFF00), 8)
-                    if equipped_container == target_container and equipped_index == target_property_index then
-                        return true
-                    end
-                end
-            end
-        end
-
-        return false
+        M.ensure_equipped_lookup()
+        return equipped_lookup[('%d:%d'):format(target_container, target_property_index)] == true
     end
 
     function M.is_slot_currently_equipped(slot)
@@ -3037,6 +3066,38 @@ local function create_item_logic(ctx)
         return M.get_item_type_border_color(slot)
     end
 
+    function M.get_slot_border_color_u32(slot)
+        if not slot or not slot.id or slot.id <= 0 then
+            return M.get_empty_slot_border_u32()
+        end
+
+        local gen = satchel.search.match_inv_gen or 0
+        if border_u32_cache_gen ~= gen then
+            border_u32_cache = {}
+            border_u32_cache_gen = gen
+        end
+
+        local cache_key = slot_cache_key(slot)
+        local cached = border_u32_cache[cache_key]
+        if cached ~= nil then
+            return cached
+        end
+
+        M.ensure_equipped_lookup()
+        local border_u32 = imgui.GetColorU32(M.get_slot_border_color(slot))
+        border_u32_cache[cache_key] = border_u32
+        return border_u32
+    end
+
+    local empty_slot_border_u32 = nil
+
+    function M.get_empty_slot_border_u32()
+        if empty_slot_border_u32 == nil then
+            empty_slot_border_u32 = imgui.GetColorU32(satchelcolors.get_empty_slot_border())
+        end
+        return empty_slot_border_u32
+    end
+
     function M.get_context_menu_actions(slot)
         if not slot or slot.container_id == nil or not slot.id or slot.id <= 0 then
             return nil
@@ -3430,7 +3491,7 @@ local function create_item_logic(ctx)
         return blob
     end
 
-    function M.matches_search(slot_or_id, query)
+    local function matches_search_impl(slot_or_id, query)
         local slot = type(slot_or_id) == 'table' and slot_or_id or nil
         local item_id = slot and slot.id or slot_or_id
         if not item_id or item_id <= 0 then
@@ -3546,6 +3607,95 @@ local function create_item_logic(ctx)
         end
 
         return false
+    end
+
+    local function empty_search_index(query, inv_gen)
+        return {
+            query = normalize_search_query(query),
+            inv_gen = inv_gen or 0,
+            slot_keys = {},
+            containers = {},
+            slips = {},
+        }
+    end
+
+    function M.build_search_index(query, inv_gen, slots_by_container, slip_ids, slip_items_fn)
+        local normalized = normalize_search_query(query)
+        inv_gen = inv_gen or 0
+        if normalized == '' then
+            return empty_search_index('', inv_gen)
+        end
+
+        local index = empty_search_index(normalized, inv_gen)
+        for container_id, slots in pairs(slots_by_container or {}) do
+            local cid = tonumber(container_id) or container_id
+            for _, slot in ipairs(slots or {}) do
+                if matches_search_impl(slot, normalized) then
+                    local key = search_slot_key(slot)
+                    if key then
+                        index.slot_keys[key] = true
+                    end
+                    index.containers[cid] = true
+                end
+            end
+        end
+
+        for _, slip_id in ipairs(slip_ids or {}) do
+            local stored = slip_items_fn and slip_items_fn(slip_id) or {}
+            for _, entry in ipairs(stored) do
+                local item_id = type(entry) == 'table' and (entry.id or entry.Id or entry.item_id) or entry
+                if matches_search_impl(item_id, normalized) then
+                    index.slips[slip_id] = true
+                    break
+                end
+            end
+        end
+
+        return index
+    end
+
+    function M.build_search_index_for_slots(query, inv_gen, slots)
+        local normalized = normalize_search_query(query)
+        inv_gen = inv_gen or 0
+        if normalized == '' then
+            return empty_search_index('', inv_gen)
+        end
+
+        local index = empty_search_index(normalized, inv_gen)
+        for _, slot in ipairs(slots or {}) do
+            if matches_search_impl(slot, normalized) then
+                local key = search_slot_key(slot)
+                if key then
+                    index.slot_keys[key] = true
+                end
+            end
+        end
+        return index
+    end
+
+    function M.index_matches_slot(index, slot)
+        if not index or index.query == '' then
+            return true
+        end
+        if not slot or not slot.id or slot.id <= 0 then
+            return false
+        end
+        local key = search_slot_key(slot)
+        return key ~= nil and index.slot_keys[key] == true
+    end
+
+    function M.index_has_slip_matches(index)
+        if not index or index.query == '' then
+            return false
+        end
+        for _ in pairs(index.slips or {}) do
+            return true
+        end
+        return false
+    end
+
+    function M.matches_search(slot_or_id, query)
+        return matches_search_impl(slot_or_id, query)
     end
 
     return M

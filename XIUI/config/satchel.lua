@@ -30,7 +30,7 @@ function M.DrawSettings()
     imgui.ShowHelp('Let XIUI handle the /satchel command (toggles this window). When off, /satchel is left for the game or other addons. /xiui satchel always works.');
 
     components.DrawCheckbox('Close on ESC', 'satchelCloseOnEscape');
-    imgui.ShowHelp('When any Satchel window is open, pressing ESC closes the most recently opened Satchel window first (slip viewers, pickers, alt inventories, then the main window). Does not close the XIUI config. Window and search state are not saved between sessions.');
+    imgui.ShowHelp('ESC always clears an active search first. When enabled, a second ESC closes the most recently opened Satchel window (slip viewers, pickers, alt inventories, then main). Does not close the XIUI config.');
 
     components.DrawCheckbox('Auto Sort Bags', 'satchelAutoSortBags');
     if HzLimitedMode then
