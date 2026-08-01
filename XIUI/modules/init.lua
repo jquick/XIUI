@@ -21,5 +21,6 @@ modules.treasurepool = require('modules.treasurepool.init');
 modules.hotbar = require('modules.hotbar.init');
 modules.readycheck = require('modules.readycheck.init');
 modules.satchel = require('modules.satchel.init');
+modules.magicburst = require('modules.magicburst');
 
 return modules;

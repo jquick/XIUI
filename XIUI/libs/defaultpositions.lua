@@ -57,6 +57,14 @@ function M.GetPetBarPosition()
 end
 
 -- Cast Cost: left side
+-- Magic Burst: upper middle, clear of the target bar and chat
+function M.GetMagicBurstPosition()
+    local sw, sh = M.GetScreenSize();
+    local x = (sw / 2) - 100;
+    local y = sh * 0.22;
+    return x, y;
+end
+
 function M.GetCastCostPosition()
     local sw, sh = M.GetScreenSize();
     local x = 50;

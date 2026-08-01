@@ -303,6 +303,12 @@ function M.UpdateUserSettings(gAdjustedSettings, default_settings, gConfig)
     gAdjustedSettings.gilTrackerSettings.gilPerHourOffsetX = (us.gilTrackerGilPerHourOffsetX or 0) * gs;
     gAdjustedSettings.gilTrackerSettings.gilPerHourOffsetY = (us.gilTrackerGilPerHourOffsetY or 0) * gs;
 
+    -- Magic Burst
+    local magicBurstScale = (us.magicBurstScale or 1.0) * gs;
+    gAdjustedSettings.magicBurstSettings.imageSize = ds.magicBurstSettings.imageSize * magicBurstScale;
+    gAdjustedSettings.magicBurstSettings.font_settings.font_height = ds.magicBurstSettings.font_settings.font_height * magicBurstScale;
+    gAdjustedSettings.magicBurstSettings.showTimer = us.magicBurstShowTimer ~= false;
+
     -- Inventory Tracker
     gAdjustedSettings.inventoryTrackerSettings.dotRadius = ds.inventoryTrackerSettings.dotRadius * us.inventoryTrackerScale * gs;
     gAdjustedSettings.inventoryTrackerSettings.dotSpacing = ds.inventoryTrackerSettings.dotSpacing * us.inventoryTrackerScale * gs;

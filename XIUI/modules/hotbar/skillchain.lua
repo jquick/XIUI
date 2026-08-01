@@ -53,6 +53,29 @@ local resonationNames = {
     'Darkness',   -- Umbra
 };
 
+-- Magic burst element per skillchain, from LSB GetSkillchainMagicElement().
+-- Multi-element chains use the first-listed (primary) one; names match assets.
+local resonationBurstElement = {
+    [Resonation.Transfixion]   = 'light',
+    [Resonation.Compression]   = 'dark',
+    [Resonation.Liquefaction]  = 'fire',
+    [Resonation.Scission]      = 'earth',
+    [Resonation.Reverberation] = 'water',
+    [Resonation.Detonation]    = 'wind',
+    [Resonation.Induration]    = 'ice',
+    [Resonation.Impaction]     = 'lightning',
+    [Resonation.Gravitation]   = 'dark',
+    [Resonation.Distortion]    = 'water',
+    [Resonation.Fusion]        = 'light',
+    [Resonation.Fragmentation] = 'wind',
+    [Resonation.Light]         = 'light',
+    [Resonation.Light2]        = 'light',
+    [Resonation.Darkness]      = 'dark',
+    [Resonation.Darkness2]     = 'dark',
+    [Resonation.Radiance]      = 'light',
+    [Resonation.Umbra]         = 'dark',
+};
+
 -- Possible skillchain combinations: {result, opening, closing}
 local possibleSkillchains = {
     { Resonation.Light, Resonation.Light, Resonation.Light },
@@ -583,8 +606,14 @@ function M.HandleActionPacket(actionPacket)
                         resonationMap[targetIndex] = resonation;
                     end
 
+                    -- Burst window runs from the chain landing to WindowClose;
+                    -- WindowOpen instead gates when the next weaponskill can chain.
+                    resonation.BurstElement = resonationBurstElement[resonation.Attributes[1]];
+                    resonation.BurstStart = now;
+
                 elseif weaponskillMessageIds[action.Message] then
-                    -- WS hit without skillchain - set up new resonation
+                    -- A WS that doesn't chain resets the server's skillchain effect to an
+                    -- opener, so replace the state outright to drop any open burst window.
                     local attributes = weaponskillResonationMap[wsId];
                     if attributes then
                         local now = os.clock();
@@ -596,6 +625,9 @@ function M.HandleActionPacket(actionPacket)
                             WindowOpen = now,
                             WindowClose = now + 10.0,
                         };
+                    else
+                        -- Unknown WS: can't predict the next chain, but the burst is over.
+                        resonationMap[targetIndex] = nil;
                     end
                 end
             end
@@ -627,6 +659,26 @@ function M.IsWindowOpen()
         end
     end
     return false;
+end
+
+-- Active magic burst window, newest chain wins when several mobs are chained.
+-- Returns element name, seconds remaining, total window length -- or nil.
+function M.GetActiveBurst()
+    local now = os.clock();
+    local newest, newestStart = nil, -1;
+
+    for _, state in pairs(resonationMap) do
+        if state.BurstElement and state.BurstStart and now < state.WindowClose
+            and state.BurstStart > newestStart then
+            newest, newestStart = state, state.BurstStart;
+        end
+    end
+
+    if not newest then
+        return nil;
+    end
+
+    return newest.BurstElement, newest.WindowClose - now, newest.WindowClose - newest.BurstStart;
 end
 
 -- Animation helper for marching ants effect

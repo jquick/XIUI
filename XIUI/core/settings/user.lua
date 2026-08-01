@@ -30,6 +30,12 @@ function M.createUserSettingsDefaults()
         showNotifications = true,
         showReadyCheck = true,
 
+        -- Magic burst notification (checkbox lives under Hotbar > Skillchain)
+        magicBurstEnabled = false,
+        magicBurstPreview = false,            -- Force display while positioning
+        magicBurstScale = 1.0,
+        magicBurstShowTimer = true,
+
         -- Ready Check module settings (per profile)
         readyCheckSoundFile = 'ffxiv-notification.wav',
         readyCheckSoundOnChecker = true,

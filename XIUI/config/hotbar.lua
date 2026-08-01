@@ -18,6 +18,11 @@ local controller = require('modules.hotbar.controller');
 local macrosLib = require('libs.ffxi.macros');
 local palette = require('modules.hotbar.palette');
 local migrationWizard = require('config.migration');
+local magicburst = require('modules.magicburst');
+
+local function syncMagicBurstPreview()
+    magicburst.SetPreview(gConfig.magicBurstEnabled and gConfig.magicBurstPreview);
+end
 local paletteManager = require('config.palettemanager');
 
 local M = {};
@@ -2756,6 +2761,19 @@ function M.DrawSettings(state)
         imgui.ShowHelp('Horizontal offset for skillchain icon position.');
         components.DrawPartySliderInt(gConfig.hotbarGlobal, 'Icon Offset Y##skillchain', 'skillchainIconOffsetY', -50, 50, '%d', nil, 0);
         imgui.ShowHelp('Vertical offset for skillchain icon position.');
+    end
+
+    syncMagicBurstPreview();
+    components.DrawCheckbox('Magic Burst Notification', 'magicBurstEnabled');
+    imgui.ShowHelp('Show a large elemental image with a countdown while a skillchain\'s magic burst window is open.');
+
+    if gConfig.magicBurstEnabled then
+        components.DrawSlider('Size##magicburst', 'magicBurstScale', 0.5, 3.0, '%.1f', UpdateUserSettings);
+        imgui.ShowHelp('Size of the elemental image (default 1.0).');
+        components.DrawCheckbox('Show Countdown##magicburst', 'magicBurstShowTimer', UpdateUserSettings);
+        imgui.ShowHelp('Show the seconds remaining in the center of the image.');
+        components.DrawCheckbox('Preview##magicburst', 'magicBurstPreview', syncMagicBurstPreview);
+        imgui.ShowHelp('Keep the notification on screen so you can drag it into place.');
     end
 
     imgui.Spacing();

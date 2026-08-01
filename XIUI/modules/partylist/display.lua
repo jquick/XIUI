@@ -1321,6 +1321,13 @@ function display.DrawPartyWindow(settings, party, partyIndex)
                     local newPosY = partyListState.y + partyListState.height - menuHeight;
                     imguiPosY = newPosY;
                     imgui.SetWindowPos(windowName, { imguiPosX, imguiPosY });
+                    -- Mirror the move into windowPositions now: SaveWindowPosition only samples
+                    -- next frame, so a settings flush in between would persist a stale Y.
+                    local savedPos = gConfig.windowPositions and gConfig.windowPositions[windowName];
+                    if (savedPos ~= nil) then
+                        savedPos.x = imguiPosX;
+                        savedPos.y = imguiPosY;
+                    end
                 end
             end
 
