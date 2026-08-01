@@ -1807,6 +1807,11 @@ local function enemyCastTrackingEnabled()
         or (gConfig.showEnemyList and gConfig.showEnemyListCastBar));
 end
 
+-- Shared by hotbar/crossbar WS highlighting and the magic burst overlay.
+local function skillchainTrackingEnabled()
+    return gConfig.hotbarEnabled or gConfig.magicBurstEnabled;
+end
+
 ashita.events.register('packet_in', 'packet_in_cb', function (e)
     if satchelModule.HandlePacketIn then
         satchelModule.HandlePacketIn(e);
@@ -1835,8 +1840,7 @@ ashita.events.register('packet_in', 'packet_in_cb', function (e)
             petBuffHandler.HandleActionPacket(actionPacket);
             actionTracker.HandleActionPacket(actionPacket);
             if gConfig.showNotifications then notifications.HandleActionPacket(actionPacket); end
-            -- Skillchain tracking for hotbar/crossbar WS highlighting
-            if gConfig.hotbarEnabled then
+            if skillchainTrackingEnabled() then
                 skillchainModule.HandleActionPacket(actionPacket);
             end
         end
@@ -1914,6 +1918,8 @@ ashita.events.register('packet_in', 'packet_in_cb', function (e)
         -- Also notify hotbar of zone (clears state)
         if gConfig.hotbarEnabled then
             hotbar.HandleZonePacket();
+        end
+        if skillchainTrackingEnabled() then
             skillchainModule.ClearState();  -- Clear skillchain tracking on zone
         end
     elseif (e.id == 0x001B) then
