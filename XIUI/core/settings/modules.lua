@@ -252,6 +252,23 @@ function M.createModuleDefaults()
             },
         },
 
+        phantomRollSettings = T{
+            dieSize = 54,
+            nameSize = 18,
+            potencySize = 15,
+            oddsSize = 12,
+            barHeight = 14,
+            horizonMode = false,
+            font_settings = T{
+                font_family = 'Tahoma',
+                font_height = 15,
+                font_color = 0xFFFFFFFF,
+                font_flags = fontconst.FLAG_BOLD,
+                outline_color = 0xFF000000,
+                outline_width = 1,
+            },
+        },
+
         inventoryTrackerSettings = T{
             columnCount = 5,
             rowCount = 6,

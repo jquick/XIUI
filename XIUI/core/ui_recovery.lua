@@ -68,6 +68,7 @@ local MODULE_REGISTRY = {
     { key = 'castBar', aliases = { 'castbar' }, keys = { 'CastBar' } },
     { key = 'castCost', aliases = { 'castcost' }, keys = { 'CastCost' } },
     { key = 'petBar', aliases = { 'petbar' }, keys = { 'PetBar', 'PetBarTarget' } },
+    { key = 'phantomRoll', aliases = { 'phantomroll' }, keys = { 'PhantomRoll' } },
     { key = 'notifications', aliases = { 'notifications' }, patterns = { '^Notifications_' } },
     { key = 'treasurePool', aliases = { 'treasurepool' }, keys = { 'TreasurePool' } },
     {

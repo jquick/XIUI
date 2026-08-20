@@ -65,6 +65,14 @@ function M.GetMagicBurstPosition()
     return x, y;
 end
 
+-- Phantom Roll: above the pet bar, left of the player bar
+function M.GetPhantomRollPosition()
+    local px, py = M.GetPlayerBarPosition();
+    local x = px - 250;
+    local y = py - 230;
+    return x, y;
+end
+
 function M.GetCastCostPosition()
     local sw, sh = M.GetScreenSize();
     local x = 50;

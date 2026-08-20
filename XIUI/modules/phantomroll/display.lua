@@ -1,0 +1,238 @@
+--[[
+* Phantom Roll window: die, potency, duration bar, and Double-Up odds.
+]]--
+
+require('common');
+require('handlers.helpers');
+local imgui = require('imgui');
+local imtext = require('libs.imtext');
+local data = require('modules.phantomroll.data');
+local dice = require('modules.phantomroll.dice');
+local tracker = require('modules.phantomroll.tracker');
+
+local M = {};
+
+local WINDOW_NAME = 'PhantomRoll';
+
+local TEXT = {
+    label       = 0xFFC7CCD4,
+    labelHot    = 0xFFFFD159,
+    labelCold   = 0xFF9ED9FF,
+    potency     = 0xFFF5F7FA,
+    potencyHot  = 0xFFFFDB66,
+    potencyCold = 0xFFB3E3FF,
+    potencyBust = 0xFFFF736B,
+    muted       = 0xFF8C949E,
+    clock       = 0xFFFAFCFF,
+    risk        = 0xFFFF7A73,
+    warn        = 0xFFF7C75C,
+    safe        = 0xFF8CD99E,
+};
+
+local BAR_FILL = {
+    normal = { 0.36, 0.72, 0.52, 0.95 },
+    warn   = { 0.88, 0.70, 0.24, 0.95 },
+    low    = { 0.88, 0.36, 0.32, 0.95 },
+    bust   = { 0.75, 0.36, 0.32, 0.95 },
+};
+
+local BAR_BACKDROP = { 0.10, 0.11, 0.13, 0.80 };
+
+-- Cached so we do not re-measure "Bust 100%" every frame.
+local oddsReserve = { oddsSize = nil, width = 0 };
+
+local function FormatClock(seconds)
+    if seconds == nil then return ''; end
+    if seconds < 0 then return '--:--'; end
+
+    local whole = math.floor(seconds + 0.5);
+    return string.format('%d:%02d', math.floor(whole / 60), whole % 60);
+end
+
+local function FormatSeconds(seconds)
+    if seconds == nil or seconds < 0 then return ''; end
+    return tostring(math.floor(seconds + 0.5));
+end
+
+local function BarFill(seconds)
+    if seconds == nil or seconds < 0 then return BAR_FILL.normal; end
+    if seconds <= 30 then return BAR_FILL.low; end
+    if seconds <= 60 then return BAR_FILL.warn; end
+    return BAR_FILL.normal;
+end
+
+-- Bust % only while Double-Up is up; unlucky is visible on the die itself.
+local function OddsText(entry, canDoubleUp)
+    if entry.busted then return 'BUSTED', TEXT.risk; end
+    if not canDoubleUp or entry.total == nil then return '', TEXT.muted; end
+
+    local bust = data.BustChance(entry.total);
+    if bust <= 0 then return 'Safe', TEXT.safe; end
+
+    return string.format('Bust %d%%', math.floor(bust * 100 + 0.5)),
+        (bust >= 0.5) and TEXT.risk or TEXT.warn;
+end
+
+local function DieStyle(entry, def)
+    if entry.busted then return 'bust'; end
+    if data.IsLucky(def, entry.total) then return 'hot'; end
+    if data.IsUnlucky(def, entry.total) then return 'cold'; end
+    return 'normal';
+end
+
+local function BuildColumn(entry, horizonMode, canDoubleUp, doubleUpSeconds)
+    local def = data.ByAbility(entry.ability, horizonMode);
+    local style = DieStyle(entry, def);
+    local seconds = tracker.SecondsLeft(entry);
+    local oddsText, oddsColor = OddsText(entry, canDoubleUp);
+    local oddsTimer = (canDoubleUp and oddsText ~= '') and FormatSeconds(doubleUpSeconds) or '';
+
+    local nameColor, potencyColor = TEXT.label, TEXT.potency;
+    if style == 'bust' then
+        potencyColor = TEXT.potencyBust;
+    elseif style == 'hot' then
+        nameColor, potencyColor = TEXT.labelHot, TEXT.potencyHot;
+    elseif style == 'cold' then
+        nameColor, potencyColor = TEXT.labelCold, TEXT.potencyCold;
+    end
+
+    return {
+        name = (def and def.name or '?'):upper(),
+        potency = data.PotencyText(def, entry.total, entry.context),
+        odds = oddsText,
+        oddsTimer = oddsTimer,
+        clock = FormatClock(seconds),
+        fraction = tracker.Fraction(entry),
+        state = { total = entry.total, style = style },
+        nameColor = nameColor,
+        potencyColor = potencyColor,
+        oddsColor = oddsColor,
+        fill = (style == 'bust') and BAR_FILL.bust or BarFill(seconds),
+    };
+end
+
+local function DrawBar(drawList, x, y, width, height, column)
+    drawList:AddRectFilled({ x, y }, { x + width, y + height },
+        dice.Color(BAR_BACKDROP), height * 0.45);
+
+    if column.fraction > 0 then
+        local fillWidth = math.max(height * 0.45, width * column.fraction);
+        drawList:AddRectFilled({ x, y }, { x + fillWidth, y + height },
+            dice.Color(column.fill), height * 0.45);
+    end
+
+    dice.CenteredText(drawList, column.clock, x + width / 2, y + height / 2,
+        height * 0.86, TEXT.clock);
+end
+
+M.DrawWindow = function(settings)
+    local dieSize = settings.dieSize;
+    local gap = dieSize * 0.26;
+    local rowGap = dieSize * 0.09;
+    local nameGap = dieSize * 0.30;      -- clears flame tips above the die
+    local iceHeadroom = dieSize * 0.32;  -- room for icicles below
+
+    imtext.SetConfigFromSettings(settings.font_settings);
+
+    local slots, slotCount = tracker.Slots();
+    local doubleUpIndex = tracker.DoubleUpIndex();
+    local doubleUpSeconds = tracker.DoubleUpSeconds();
+
+    local columns = {};
+    local columnWidth = dieSize * 1.35;
+    local oddsGap = settings.oddsSize * 0.45;
+    if oddsReserve.oddsSize ~= settings.oddsSize then
+        local w = imtext.Measure('Bust 100%', settings.oddsSize);
+        local t = imtext.Measure('45', settings.oddsSize);
+        oddsReserve.oddsSize = settings.oddsSize;
+        oddsReserve.width = w + oddsGap + t;
+    end
+    columnWidth = math.max(columnWidth, oddsReserve.width);
+
+    for i = 1, slotCount do
+        if slots[i] ~= nil then
+            local column = BuildColumn(
+                slots[i], settings.horizonMode, i == doubleUpIndex, doubleUpSeconds);
+            columns[#columns + 1] = column;
+            columnWidth = math.max(columnWidth,
+                imtext.Measure(column.name, settings.nameSize),
+                imtext.Measure(column.potency, settings.potencySize));
+        end
+    end
+
+    local count = #columns;
+    if count == 0 then return; end
+
+    local contentWidth = columnWidth * count + gap * (count - 1);
+    local contentHeight = settings.nameSize + nameGap + dieSize + iceHeadroom
+        + rowGap + settings.potencySize + rowGap + settings.barHeight + rowGap + settings.oddsSize;
+
+    imgui.SetNextWindowSize({ -1, -1 }, ImGuiCond_Always);
+    imgui.PushStyleVar(ImGuiStyleVar_WindowPadding, { 0, 0 });
+
+    ApplyWindowPosition(WINDOW_NAME);
+    if imgui.Begin(WINDOW_NAME, true, GetBaseWindowFlags(gConfig.lockPositions)) then
+        SaveWindowPosition(WINDOW_NAME);
+
+        local originX, originY = imgui.GetCursorScreenPos();
+        imgui.Dummy({ contentWidth, contentHeight });
+
+        local drawList = GetUIDrawList();
+        local clock = os.clock();
+
+        for i = 1, count do
+            local column = columns[i];
+            local centerX = originX + (i - 1) * (columnWidth + gap) + columnWidth / 2;
+            local y = originY;
+
+            dice.CenteredText(drawList, column.name, centerX, y + settings.nameSize / 2,
+                settings.nameSize, column.nameColor);
+            y = y + settings.nameSize + nameGap;
+
+            dice.Draw(drawList, centerX - dieSize / 2, y, dieSize, column.state, clock,
+                settings.font_settings);
+            y = y + dieSize + iceHeadroom + rowGap;
+
+            dice.CenteredText(drawList, column.potency, centerX, y + settings.potencySize / 2,
+                settings.potencySize, column.potencyColor);
+            y = y + settings.potencySize + rowGap;
+
+            DrawBar(drawList, centerX - columnWidth / 2, y, columnWidth, settings.barHeight, column);
+            y = y + settings.barHeight + rowGap;
+
+            if column.odds ~= '' then
+                local oddsY = y + settings.oddsSize / 2;
+                if column.oddsTimer ~= '' then
+                    local oddsW = imtext.Measure(column.odds, settings.oddsSize);
+                    local timerW = imtext.Measure(column.oddsTimer, settings.oddsSize);
+                    local totalW = oddsW + oddsGap + timerW;
+                    local left = centerX - totalW / 2;
+                    dice.CenteredText(drawList, column.odds, left + oddsW / 2, oddsY,
+                        settings.oddsSize, column.oddsColor);
+                    dice.CenteredText(drawList, column.oddsTimer, left + oddsW + oddsGap + timerW / 2,
+                        oddsY, settings.oddsSize, TEXT.muted);
+                else
+                    dice.CenteredText(drawList, column.odds, centerX, oddsY,
+                        settings.oddsSize, column.oddsColor);
+                end
+            end
+        end
+    end
+    imgui.End();
+
+    imgui.PopStyleVar();
+end
+
+M.ResetPositions = function()
+    local defaultPositions = require('libs.defaultpositions');
+    local x, y = defaultPositions.GetPhantomRollPosition();
+
+    if gConfig and gConfig.windowPositions then
+        gConfig.windowPositions[WINDOW_NAME] = { x = x, y = y };
+        if gConfig.appliedPositions then
+            gConfig.appliedPositions[WINDOW_NAME] = nil;
+        end
+    end
+end
+
+return M;

@@ -35,6 +35,13 @@ function M.createUserSettingsDefaults()
         magicBurstScale = 1.0,
         magicBurstShowTimer = true,
 
+        -- Corsair Phantom Roll tracker
+        showPhantomRoll = false,
+        phantomRollScale = 1.0,
+        phantomRollHorizonMode = false,
+        phantomRollHideOnMenuFocus = false,
+        phantomRollHideMacroPalette = false,
+
         -- Ready Check module settings (per profile)
         readyCheckSoundFile = 'ffxiv-notification.wav',
         readyCheckSoundOnChecker = true,

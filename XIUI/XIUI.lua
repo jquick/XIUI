@@ -84,6 +84,7 @@ local hotbar = uiMods.hotbar;
 local readyCheck = uiMods.readycheck;
 local satchelModule = uiMods.satchel;
 local magicBurst = uiMods.magicburst;
+local phantomRoll = uiMods.phantomroll;
 local macropalette = require('modules.hotbar.macropalette');
 local palette = require('modules.hotbar.palette');
 local skillchainModule = require('modules.hotbar.skillchain');
@@ -194,6 +195,14 @@ uiModules.Register('magicBurst', {
     settingsKey = 'magicBurstSettings',
     configKey = 'magicBurstEnabled',
     hideOnEventKey = 'hideDuringEvents',
+    hasSetHidden = true,
+});
+uiModules.Register('phantomRoll', {
+    module = phantomRoll,
+    settingsKey = 'phantomRollSettings',
+    configKey = 'showPhantomRoll',
+    hideOnMenuFocusKey = 'phantomRollHideOnMenuFocus',
+    hideMacroPaletteKey = 'phantomRollHideMacroPalette',
     hasSetHidden = true,
 });
 uiModules.Register('gilTracker', {
@@ -552,6 +561,7 @@ local function GetDefaultWindowPositions()
     local elx, ely = defPos.GetEnemyListPosition();
     local ccx, ccy = defPos.GetCastCostPosition();
     local mbx, mby = defPos.GetMagicBurstPosition();
+    local prx, pry = defPos.GetPhantomRollPosition();
 
     local staggerY = 35;
     return {
@@ -570,6 +580,7 @@ local function GetDefaultWindowPositions()
         EnemyList = { x = elx, y = ely },
         CastCost = { x = ccx, y = ccy },
         MagicBurst = { x = mbx, y = mby },
+        PhantomRoll = { x = prx, y = pry },
         InventoryTracker = { x = ix, y = iy },
         Satchel = { x = sx, y = sy },
         SatchelTracker = { x = ix, y = iy + staggerY },
@@ -1845,6 +1856,7 @@ ashita.events.register('packet_in', 'packet_in_cb', function (e)
             petBuffHandler.HandleActionPacket(actionPacket);
             actionTracker.HandleActionPacket(actionPacket);
             if gConfig.showNotifications then notifications.HandleActionPacket(actionPacket); end
+            if gConfig.showPhantomRoll then phantomRoll.HandleActionPacket(actionPacket); end
             if skillchainTrackingEnabled() then
                 skillchainModule.HandleActionPacket(actionPacket);
             end
@@ -1863,6 +1875,7 @@ ashita.events.register('packet_in', 'packet_in_cb', function (e)
         debuffHandler.HandleZonePacket(e);
         petBuffHandler.HandleZonePacket();
         actionTracker.HandleZonePacket();
+        phantomRoll.HandleZonePacket();
         mobInfo.data.HandleZonePacket(e);
         statusHandler.clear_zone_cache();  -- Clear status icon cache to prevent accumulation
         gilTracker.HandleZoneInPacket(e);  -- Only reset on fresh login, not zone changes (issue #111)
