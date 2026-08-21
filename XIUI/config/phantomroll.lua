@@ -25,8 +25,7 @@ function M.DrawSettings()
 end
 
 function M.DrawColorSettings()
-    imgui.TextDisabled('The dice colour themselves: gold on a lucky number or 11,');
-    imgui.TextDisabled('ice blue on the unlucky number, and red on a bust.');
+    imgui.TextDisabled('No color settings for Phantom Roll.');
 end
 
 return M;
