@@ -136,12 +136,6 @@ local function Place(def, total)
     return index, entry;
 end
 
--- Keep the same seat; a second bust occupies the other die instead of replacing this one.
-local function MarkBusted(entry)
-    entry.busted = true;
-    ArmCountdown(entry);
-end
-
 local function RollTotal(actionPacket, serverId)
     if actionPacket.Targets == nil then return nil; end
 
@@ -183,7 +177,8 @@ M.HandleActionPacket = function(actionPacket)
     entry.total = total;
 
     if total > data.MAX_TOTAL then
-        MarkBusted(entry);
+        entry.busted = true;
+        ArmCountdown(entry);
         doubleUpExpiresAt = nil;
     else
         entry.busted = false;
@@ -317,7 +312,7 @@ M.Demo = function()
     local hunters = data.ByAbility(108);
     local chaos = data.ByAbility(105);
     local now = Now();
-    local context = data.Context(false);
+    local context = data.Context(HorizonMode());
 
     slots = {};
     slots[1] = NewEntry(hunters, hunters.lucky);

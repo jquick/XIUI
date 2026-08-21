@@ -116,13 +116,10 @@ local function BuildIndex(useHorizon)
         local def = base;
         local override = useHorizon and HORIZON.rolls[base.name];
 
-        if useHorizon or override then
+        if override then
             def = {};
             for key, value in pairs(base) do def[key] = value; end
-            if override then
-                for key, value in pairs(override) do def[key] = value; end
-            end
-            if useHorizon then def.bonus = 0; end
+            for key, value in pairs(override) do def[key] = value; end
         end
 
         byAbility[base.ability] = def;
