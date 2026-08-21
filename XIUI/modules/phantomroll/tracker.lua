@@ -17,18 +17,13 @@ local rollSequence = 0;
 local doubleUpExpiresAt = nil;
 local lastSyncAt = 0;
 
--- Reused across Sync calls so we do not allocate every frame.
-local presentBuf, timersBuf = {}, {};
-local bustTimesBuf = {};
+-- Reused across Sync calls so we do not allocate every poll.
+local presentBuf, timersBuf, bustTimesBuf = {}, {}, {};
 local bustTimesN = 0;
 
-local function Now()
-    return os.clock();
-end
-
-local function Left(expiresAt)
+local function Remaining(expiresAt)
     if expiresAt == nil then return 0; end
-    return math.max(0, expiresAt - Now());
+    return math.max(0, expiresAt - os.clock());
 end
 
 local function ClearMap(map)
@@ -42,19 +37,25 @@ end
 
 -- Seed a packet-time countdown; Sync replaces it once the buff is readable.
 local function ArmCountdown(entry)
-    local now = Now();
+    local now = os.clock();
     entry.expiresAt = now + data.BASE_DURATION;
     entry.duration = data.BASE_DURATION;
-    entry.pending = true;  -- do not clear until the buff has been seen once
+    entry.pending = true;
+end
+
+local function ApplyTimer(entry, seconds, now)
+    if seconds == nil or seconds < 0 then return; end
+    entry.expiresAt = now + seconds;
+    entry.duration = math.max(entry.duration or seconds, seconds);
 end
 
 -- Split presence from readable timers so an unreadable stamp is not "missing".
 local function ReadRollBuffs()
     local player = AshitaCore:GetMemoryManager():GetPlayer();
-    if player == nil then return nil, nil; end
+    if player == nil then return false; end
 
     local buffs = player:GetBuffs();
-    if buffs == nil then return nil, nil; end
+    if buffs == nil then return false; end
     local statusTimers = player:GetStatusTimers();
     local stamp = vanatime.Utc();
 
@@ -77,63 +78,34 @@ local function ReadRollBuffs()
             end
         end
     end
-    return presentBuf, timersBuf;
+    return true;
 end
 
--- Live rolls only; a busted seat keeps the old status id and must not be reused.
-local function FindSlot(statusId)
+-- Matching live roll, else a free seat, else the soonest-expiring live roll.
+-- Never evicts a bust (Hunter replacing Chaos must leave a busted seat).
+local function ClaimSlot(statusId)
+    local empty, victim, shortest = nil, nil, math.huge;
     for i = 1, MAX_SLOTS do
         local entry = slots[i];
-        if entry ~= nil and not entry.busted and entry.status == statusId then
+        if entry == nil then
+            empty = empty or i;
+        elseif not entry.busted and entry.status == statusId then
             return i;
-        end
-    end
-    return nil;
-end
-
-local function NewEntry(def, total)
-    local entry = {
-        ability = def.ability,
-        status = def.status,
-        total = total,
-        sequence = 0,  -- 0: never saw this roll, so it cannot be doubled up
-        busted = false,
-    };
-    ArmCountdown(entry);
-    return entry;
-end
-
--- Free seat, else soonest-expiring live roll. Never evicts a bust.
-local function ReplacementSlot()
-    for i = 1, MAX_SLOTS do
-        if slots[i] == nil then return i; end
-    end
-
-    local victim, shortest = nil, math.huge;
-    for i = 1, MAX_SLOTS do
-        local entry = slots[i];
-        if entry ~= nil and not entry.busted then
-            local remaining = M.SecondsLeft(entry) or 0;
-            if remaining < shortest then
-                victim, shortest = i, remaining;
+        elseif not entry.busted then
+            local left = Remaining(entry.expiresAt);
+            if left < shortest then
+                victim, shortest = i, left;
             end
         end
     end
-    return victim;
+    return empty or victim;
 end
 
-local function Place(def, total)
-    local index = FindSlot(def.status);
-    if index ~= nil then
-        return index, slots[index];
+local function EmptySlot()
+    for i = 1, MAX_SLOTS do
+        if slots[i] == nil then return i; end
     end
-
-    index = ReplacementSlot();
-    if index == nil then return nil, nil; end
-
-    local entry = NewEntry(def, total);
-    slots[index] = entry;
-    return index, entry;
+    return nil;
 end
 
 local function RollTotal(actionPacket, serverId)
@@ -150,12 +122,6 @@ local function RollTotal(actionPacket, serverId)
     return fallback;
 end
 
-local function ApplyTimer(entry, seconds, now)
-    if seconds == nil or seconds < 0 then return; end
-    entry.expiresAt = now + seconds;
-    entry.duration = math.max(entry.duration or seconds, seconds);
-end
-
 M.HandleActionPacket = function(actionPacket)
     if actionPacket == nil or actionPacket.Type ~= data.JOB_ABILITY_CATEGORY then return; end
 
@@ -169,29 +135,27 @@ M.HandleActionPacket = function(actionPacket)
     local total = RollTotal(actionPacket, serverId);
     if total == nil then return; end
 
-    local index, entry = Place(def, total);
-    if entry == nil then return; end
+    local index = ClaimSlot(def.status);
+    if index == nil then return; end
 
-    rollSequence = rollSequence + 1;
-    entry.sequence = rollSequence;
-    entry.total = total;
-
-    if total > data.MAX_TOTAL then
-        entry.busted = true;
-        ArmCountdown(entry);
-        doubleUpExpiresAt = nil;
-    else
-        entry.busted = false;
-        ArmCountdown(entry);
+    local entry = slots[index];
+    if entry == nil or entry.busted or entry.status ~= def.status then
+        entry = { ability = def.ability, status = def.status, sequence = 0 };
+        slots[index] = entry;
     end
 
-    -- Potency is fixed when the roll lands; snapshot gear/party/level here.
+    rollSequence = rollSequence + 1;
+    entry.total = total;
+    entry.sequence = rollSequence;
+    entry.busted = total > data.MAX_TOTAL;
     entry.context = data.Context(HorizonMode());
-    lastSyncAt = 0;  -- pick the new buff up on the next draw
+    ArmCountdown(entry);
+    if entry.busted then doubleUpExpiresAt = nil; end
+    lastSyncAt = 0;
 end
 
 M.DoubleUpIndex = function()
-    if Left(doubleUpExpiresAt) <= 0 then return nil; end
+    if Remaining(doubleUpExpiresAt) <= 0 then return nil; end
 
     local best, bestSequence = nil, 0;
     for i = 1, MAX_SLOTS do
@@ -206,78 +170,65 @@ M.DoubleUpIndex = function()
 end
 
 M.DoubleUpSeconds = function()
-    return Left(doubleUpExpiresAt);
+    return Remaining(doubleUpExpiresAt);
 end
 
--- Bust dice follow copies of status 309 (you can have two).
-local function SyncBusts(now)
-    local seen = 0;
+M.Sync = function()
+    local now = os.clock();
+    if (now - lastSyncAt) < SYNC_INTERVAL then return; end
+    lastSyncAt = now;
+    if not ReadRollBuffs() then return; end
+
+    local bustSeen = 0;
     for i = 1, MAX_SLOTS do
         local entry = slots[i];
-        if entry ~= nil and entry.busted then
-            seen = seen + 1;
-            if seen > bustTimesN and not entry.pending then
-                slots[i] = nil;
+        if entry ~= nil then
+            if entry.busted then
+                bustSeen = bustSeen + 1;
+                if bustSeen > bustTimesN and not entry.pending then
+                    slots[i] = nil;
+                else
+                    if bustTimesN > 0 then entry.pending = false; end
+                    ApplyTimer(entry, bustTimesBuf[bustSeen], now);
+                end
+            elseif not presentBuf[entry.status] then
+                if not entry.pending then slots[i] = nil; end
             else
-                if bustTimesN > 0 then entry.pending = false; end
-                ApplyTimer(entry, bustTimesBuf[seen], now);
+                entry.pending = false;
+                ApplyTimer(entry, timersBuf[entry.status], now);
             end
         end
     end
 
-    for i = seen + 1, bustTimesN do
-        local seat = nil;
-        for s = 1, MAX_SLOTS do
-            if slots[s] == nil then seat = s; break; end
-        end
+    -- Extra 309s with no packet seat (e.g. bust before we saw the roll).
+    for n = bustSeen + 1, bustTimesN do
+        local seat = EmptySlot();
         if seat == nil then break; end
-        slots[seat] = {
-            ability = nil,
+        local entry = {
             status = data.BUST_STATUS,
             total = data.BUST_TOTAL,
             sequence = 0,
             busted = true,
             pending = false,
         };
-        ApplyTimer(slots[seat], bustTimesBuf[i], now);
-    end
-end
-
-M.Sync = function()
-    local now = Now();
-    if (now - lastSyncAt) < SYNC_INTERVAL then return; end
-    lastSyncAt = now;
-
-    local present, timers = ReadRollBuffs();
-    if present == nil then return; end
-
-    for i = 1, MAX_SLOTS do
-        local entry = slots[i];
-        if entry ~= nil and not entry.busted then
-            if not present[entry.status] then
-                if not entry.pending then slots[i] = nil; end
-            else
-                entry.pending = false;
-                ApplyTimer(entry, timers[entry.status], now);
-            end
-        end
+        ApplyTimer(entry, bustTimesBuf[n], now);
+        slots[seat] = entry;
     end
 
-    SyncBusts(now);
-
-    if not present[data.DOUBLE_UP_STATUS] then
+    if not presentBuf[data.DOUBLE_UP_STATUS] then
         doubleUpExpiresAt = nil;
-    else
-        local seconds = timers[data.DOUBLE_UP_STATUS];
-        if seconds ~= nil and seconds >= 0 then
-            doubleUpExpiresAt = now + seconds;
-        end
+        return;
+    end
+
+    local seconds = timersBuf[data.DOUBLE_UP_STATUS];
+    if seconds ~= nil and seconds >= 0 then
+        doubleUpExpiresAt = now + seconds;
     end
 end
 
 M.SecondsLeft = function(entry)
     if entry == nil or entry.expiresAt == nil then return nil; end
-    return Left(entry.expiresAt);
+    return Remaining(entry.expiresAt);
 end
 
 M.Fraction = function(entry)
@@ -295,10 +246,7 @@ M.Slots = function()
 end
 
 M.HasAny = function()
-    for i = 1, MAX_SLOTS do
-        if slots[i] ~= nil then return true; end
-    end
-    return false;
+    return slots[1] ~= nil or slots[2] ~= nil;
 end
 
 M.Clear = function()
@@ -311,21 +259,27 @@ end
 M.Demo = function()
     local hunters = data.ByAbility(108);
     local chaos = data.ByAbility(105);
-    local now = Now();
+    local now = os.clock();
     local context = data.Context(HorizonMode());
 
-    slots = {};
-    slots[1] = NewEntry(hunters, hunters.lucky);
-    slots[1].expiresAt, slots[1].duration, slots[1].sequence = now + 268, 300, 1;
-    slots[1].pending = false;
-    slots[1].context = context;
+    local function DemoSeat(def, total, left, sequence)
+        return {
+            ability = def.ability,
+            status = def.status,
+            total = total,
+            sequence = sequence,
+            busted = false,
+            pending = false,
+            expiresAt = now + left,
+            duration = data.BASE_DURATION,
+            context = context,
+        };
+    end
 
-    -- Lucky + unlucky pair; right die rolled last so it shows bust odds.
-    slots[2] = NewEntry(chaos, chaos.unlucky);
-    slots[2].expiresAt, slots[2].duration, slots[2].sequence = now + 154, 300, 2;
-    slots[2].pending = false;
-    slots[2].context = context;
-
+    slots = {
+        DemoSeat(hunters, hunters.lucky, 268, 1),
+        DemoSeat(chaos, chaos.unlucky, 154, 2),
+    };
     rollSequence = 2;
     doubleUpExpiresAt = now + 32;
 end
