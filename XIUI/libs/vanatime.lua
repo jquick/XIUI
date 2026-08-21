@@ -51,7 +51,7 @@ M.StatusSeconds = function(raw, stamp)
 
     local remaining = raw - ((stamp - VANA_BASE) * 60);
     while remaining < -2147483648 do
-        remaining = remaining + 0xFFFFFFFF;
+        remaining = remaining + 0x100000000;
     end
 
     return (remaining < 1) and 0 or math.ceil(remaining / 60);
