@@ -16,7 +16,7 @@ function M.DrawSettings()
 
     if components.CollapsingSection('Display Options##phantomRoll') then
         components.DrawCheckbox('Horizon Mode', 'phantomRollHorizonMode', UpdateUserSettings);
-        imgui.ShowHelp('Use HorizonXI values, where some rolls grant a flat bonus instead of a percentage. Chaos becomes flat attack that scales with your level.');
+        imgui.ShowHelp('Use HorizonXI values: Chaos is flat ATK that scales with level, Gallant\'s is flat DEF, and Healer\'s is hMP. Party-job bonuses are off.');
     end
 
     if components.CollapsingSection('Scale & Position##phantomRoll') then

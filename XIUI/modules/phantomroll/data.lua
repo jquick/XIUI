@@ -80,13 +80,17 @@ local ROLLS = {
 };
 
 --[[
-* Horizon overrides. Chaos: flat ATK via round(power * level * 3 / 70); powers
-* already include +1 Phantom Roll step; bust is flat -15. Gear ids differ on retail.
+* Horizon: no party-job bonus. Chaos ATK is floor(lv75 * level / 75);
+* bust is flat -15. Gallant's is flat DEF; Healer's is hMP.
 ]]--
 local HORIZON = {
     rolls = {
         ['Chaos'] = { unit = FLAT, perLevel = true,
-          powers = { 9, 11, 12, 28, 14, 16, 19, 6, 20, 22, 34, -15 } },
+          powers = { 29, 36, 39, 92, 45, 54, 61, 21, 64, 71, 111, -15 } },
+        ["Gallant's"] = { unit = FLAT, stat = 'DEF', scale = 1, step = 4,
+          powers = { 48, 60, 200, 72, 88, 104, 32, 120, 140, 160, 240, -120 } },
+        ["Healer's"] = { unit = FLAT, stat = 'hMP',
+          powers = { 2, 3, 10, 4, 4, 5, 1, 6, 6, 7, 12, -3 } },
     },
     gear = {
         [15601] = 1,  -- Corsair's Culottes
@@ -112,10 +116,13 @@ local function BuildIndex(useHorizon)
         local def = base;
         local override = useHorizon and HORIZON.rolls[base.name];
 
-        if override then
+        if useHorizon or override then
             def = {};
             for key, value in pairs(base) do def[key] = value; end
-            for key, value in pairs(override) do def[key] = value; end
+            if override then
+                for key, value in pairs(override) do def[key] = value; end
+            end
+            if useHorizon then def.bonus = 0; end
         end
 
         byAbility[base.ability] = def;
@@ -191,9 +198,10 @@ local function PlayerLevel()
 end
 
 M.Context = function(horizonMode)
+    local horizon = horizonMode == true;
     return {
-        gear = EquippedRollBonus(horizonMode == true),
-        partyJobs = PartyJobs(),
+        gear = EquippedRollBonus(horizon),
+        partyJobs = (not horizon) and PartyJobs() or nil,
         level = PlayerLevel(),
     };
 end
@@ -213,7 +221,7 @@ M.Potency = function(def, total, context)
         if def.perLevel then
             local level = context.level or 0;
             if level <= 0 then return nil; end
-            power = math.floor(power * level * 3 / 70 + 0.5);
+            power = math.floor(power * level / 75);
         end
     end
 

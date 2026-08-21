@@ -19,6 +19,8 @@ local lastSyncAt = 0;
 
 -- Reused across Sync calls so we do not allocate every frame.
 local presentBuf, timersBuf = {}, {};
+local bustTimesBuf = {};
+local bustTimesN = 0;
 
 local function Now()
     return os.clock();
@@ -58,23 +60,33 @@ local function ReadRollBuffs()
 
     ClearMap(presentBuf);
     ClearMap(timersBuf);
+    bustTimesN = 0;
 
-    for i = 1, 32 do
+    -- 0..32 covers both 0-based and 1-based Ashita buff arrays.
+    -- Bust can occupy two slots (same status id); collect every copy.
+    for i = 0, 32 do
         local statusId = buffs[i];
         if statusId ~= nil and data.IsTrackedStatus(statusId) then
-            presentBuf[statusId] = true;
             local seconds = vanatime.StatusSeconds(statusTimers and statusTimers[i] or nil, stamp);
-            if seconds ~= nil then
-                timersBuf[statusId] = seconds;
+            if statusId == data.BUST_STATUS then
+                bustTimesN = bustTimesN + 1;
+                bustTimesBuf[bustTimesN] = seconds;
+            else
+                presentBuf[statusId] = true;
+                if seconds ~= nil then timersBuf[statusId] = seconds; end
             end
         end
     end
     return presentBuf, timersBuf;
 end
 
+-- Live rolls only; a busted seat keeps the old status id and must not be reused.
 local function FindSlot(statusId)
     for i = 1, MAX_SLOTS do
-        if slots[i] ~= nil and slots[i].status == statusId then return i; end
+        local entry = slots[i];
+        if entry ~= nil and not entry.busted and entry.status == statusId then
+            return i;
+        end
     end
     return nil;
 end
@@ -91,7 +103,7 @@ local function NewEntry(def, total)
     return entry;
 end
 
--- Free seat, else soonest-expiring non-bust (what the server drops at two rolls).
+-- Free seat, else soonest-expiring live roll. Never evicts a bust.
 local function ReplacementSlot()
     for i = 1, MAX_SLOTS do
         if slots[i] == nil then return i; end
@@ -99,12 +111,15 @@ local function ReplacementSlot()
 
     local victim, shortest = nil, math.huge;
     for i = 1, MAX_SLOTS do
-        local remaining = M.SecondsLeft(slots[i]) or 0;
-        if not slots[i].busted and remaining < shortest then
-            victim, shortest = i, remaining;
+        local entry = slots[i];
+        if entry ~= nil and not entry.busted then
+            local remaining = M.SecondsLeft(entry) or 0;
+            if remaining < shortest then
+                victim, shortest = i, remaining;
+            end
         end
     end
-    return victim or 1;
+    return victim;
 end
 
 local function Place(def, total)
@@ -114,17 +129,15 @@ local function Place(def, total)
     end
 
     index = ReplacementSlot();
+    if index == nil then return nil, nil; end
+
     local entry = NewEntry(def, total);
     slots[index] = entry;
     return index, entry;
 end
 
--- Keep the same seat/identity; only the countdown switches to the Bust debuff.
-local function MarkBusted(index, entry)
-    for i = 1, MAX_SLOTS do
-        if i ~= index and slots[i] ~= nil and slots[i].busted then slots[i] = nil; end
-    end
-
+-- Keep the same seat; a second bust occupies the other die instead of replacing this one.
+local function MarkBusted(entry)
     entry.busted = true;
     ArmCountdown(entry);
 end
@@ -163,13 +176,14 @@ M.HandleActionPacket = function(actionPacket)
     if total == nil then return; end
 
     local index, entry = Place(def, total);
+    if entry == nil then return; end
 
     rollSequence = rollSequence + 1;
     entry.sequence = rollSequence;
     entry.total = total;
 
     if total > data.MAX_TOTAL then
-        MarkBusted(index, entry);
+        MarkBusted(entry);
         doubleUpExpiresAt = nil;
     else
         entry.busted = false;
@@ -200,6 +214,40 @@ M.DoubleUpSeconds = function()
     return Left(doubleUpExpiresAt);
 end
 
+-- Bust dice follow copies of status 309 (you can have two).
+local function SyncBusts(now)
+    local seen = 0;
+    for i = 1, MAX_SLOTS do
+        local entry = slots[i];
+        if entry ~= nil and entry.busted then
+            seen = seen + 1;
+            if seen > bustTimesN and not entry.pending then
+                slots[i] = nil;
+            else
+                if bustTimesN > 0 then entry.pending = false; end
+                ApplyTimer(entry, bustTimesBuf[seen], now);
+            end
+        end
+    end
+
+    for i = seen + 1, bustTimesN do
+        local seat = nil;
+        for s = 1, MAX_SLOTS do
+            if slots[s] == nil then seat = s; break; end
+        end
+        if seat == nil then break; end
+        slots[seat] = {
+            ability = nil,
+            status = data.BUST_STATUS,
+            total = data.BUST_TOTAL,
+            sequence = 0,
+            busted = true,
+            pending = false,
+        };
+        ApplyTimer(slots[seat], bustTimesBuf[i], now);
+    end
+end
+
 M.Sync = function()
     local now = Now();
     if (now - lastSyncAt) < SYNC_INTERVAL then return; end
@@ -210,20 +258,17 @@ M.Sync = function()
 
     for i = 1, MAX_SLOTS do
         local entry = slots[i];
-        if entry ~= nil then
-            local timerId = entry.busted and data.BUST_STATUS or entry.status;
-            if not present[timerId] then
-                -- Bust swap: outgoing roll buff can linger; that is still this seat.
-                local swapping = entry.busted and present[entry.status];
-                if not swapping and not entry.pending then
-                    slots[i] = nil;
-                end
+        if entry ~= nil and not entry.busted then
+            if not present[entry.status] then
+                if not entry.pending then slots[i] = nil; end
             else
                 entry.pending = false;
-                ApplyTimer(entry, timers[timerId], now);
+                ApplyTimer(entry, timers[entry.status], now);
             end
         end
     end
+
+    SyncBusts(now);
 
     if not present[data.DOUBLE_UP_STATUS] then
         doubleUpExpiresAt = nil;

@@ -37,6 +37,7 @@ local BAR_FILL = {
 };
 
 local BAR_BACKDROP = { 0.10, 0.11, 0.13, 0.80 };
+local BAR_BORDER = { 0, 0, 0, 1 };
 
 -- Cached so we do not re-measure "Bust 100%" every frame.
 local oddsReserve = { oddsSize = nil, width = 0 };
@@ -97,7 +98,7 @@ local function BuildColumn(entry, horizonMode, canDoubleUp, doubleUpSeconds)
     end
 
     return {
-        name = (def and def.name or '?'):upper(),
+        name = (def and def.name or (entry.busted and 'Bust' or '?')):upper(),
         potency = data.PotencyText(def, entry.total, entry.context),
         odds = oddsText,
         oddsTimer = oddsTimer,
@@ -112,14 +113,19 @@ local function BuildColumn(entry, horizonMode, canDoubleUp, doubleUpSeconds)
 end
 
 local function DrawBar(drawList, x, y, width, height, column)
+    local rounding = height * 0.45;
     drawList:AddRectFilled({ x, y }, { x + width, y + height },
-        dice.Color(BAR_BACKDROP), height * 0.45);
+        dice.Color(BAR_BACKDROP), rounding);
 
     if column.fraction > 0 then
-        local fillWidth = math.max(height * 0.45, width * column.fraction);
+        local fillWidth = math.max(rounding, width * column.fraction);
         drawList:AddRectFilled({ x, y }, { x + fillWidth, y + height },
-            dice.Color(column.fill), height * 0.45);
+            dice.Color(column.fill), rounding);
     end
+
+    -- Same idea as player/target bars: a thin stroke around the fill.
+    drawList:AddRect({ x, y }, { x + width, y + height },
+        dice.Color(BAR_BORDER), rounding, 15, 1.0);
 
     dice.CenteredText(drawList, column.clock, x + width / 2, y + height / 2,
         height * 0.86, TEXT.clock);
