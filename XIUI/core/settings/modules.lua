@@ -258,7 +258,7 @@ function M.createModuleDefaults()
             potencySize = 15,
             oddsSize = 12,
             barHeight = 14,
-            horizonMode = false,
+            horizonMode = HzLimitedMode == true,
             font_settings = T{
                 font_family = 'Tahoma',
                 font_height = 15,

@@ -38,7 +38,7 @@ function M.createUserSettingsDefaults()
         -- Corsair Phantom Roll tracker
         showPhantomRoll = false,
         phantomRollScale = 1.0,
-        phantomRollHorizonMode = false,
+        phantomRollHorizonMode = HzLimitedMode == true,
         phantomRollHideOnMenuFocus = false,
         phantomRollHideMacroPalette = false,
 
