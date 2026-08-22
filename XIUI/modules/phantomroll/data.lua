@@ -12,6 +12,7 @@ M.BASE_DURATION = 300;
 M.JOB_ABILITY_CATEGORY = 6;
 M.BUST_STATUS = 309;       -- occupies a roll seat after a bust
 M.DOUBLE_UP_STATUS = 308;  -- window to Double-Up the last roll
+M.DOUBLE_UP_DURATION = 45;
 
 -- powers[1..11] + bust; step = Phantom Roll+1; bonus = party job boost; scale for Gallant's.
 local ROLLS = {
@@ -110,7 +111,7 @@ local ROLL_BONUS_GEAR = {
 local BONUS_GEAR_SLOTS = { 7, 9, 12, 13, 14 };  -- legs, neck, r.ear, rings
 
 local function BuildIndex(useHorizon)
-    local byAbility, byStatus = {}, {};
+    local byAbility = {};
 
     for _, base in ipairs(ROLLS) do
         local def = base;
@@ -123,34 +124,27 @@ local function BuildIndex(useHorizon)
         end
 
         byAbility[base.ability] = def;
-        byStatus[base.status] = def;
     end
 
-    return { byAbility = byAbility, byStatus = byStatus };
+    return byAbility;
 end
 
 local INDEX = { [false] = BuildIndex(false), [true] = BuildIndex(true) };
 
-local function Index(horizonMode)
-    return INDEX[horizonMode == true];
+local TRACKED_STATUS = {
+    [M.BUST_STATUS] = true,
+    [M.DOUBLE_UP_STATUS] = true,
+};
+for i = 1, #ROLLS do
+    TRACKED_STATUS[ROLLS[i].status] = true;
 end
 
 M.ByAbility = function(abilityId, horizonMode)
-    return Index(horizonMode).byAbility[abilityId];
-end
-
-M.ByStatus = function(statusId, horizonMode)
-    return Index(horizonMode).byStatus[statusId];
-end
-
-M.IsRollStatus = function(statusId)
-    return INDEX[false].byStatus[statusId] ~= nil;
+    return INDEX[horizonMode == true][abilityId];
 end
 
 M.IsTrackedStatus = function(statusId)
-    return M.IsRollStatus(statusId)
-        or statusId == M.BUST_STATUS
-        or statusId == M.DOUBLE_UP_STATUS;
+    return TRACKED_STATUS[statusId] == true;
 end
 
 local function EquippedRollBonus(horizonMode)
@@ -243,12 +237,7 @@ end
 
 M.BustChance = function(total)
     if total == nil or total < 1 or total > M.MAX_TOTAL then return 0; end
-
-    local busts = 0;
-    for face = 1, 6 do
-        if total + face > M.MAX_TOTAL then busts = busts + 1; end
-    end
-    return busts / 6;
+    return math.max(0, total - 5) / 6;
 end
 
 M.IsLucky = function(def, total)

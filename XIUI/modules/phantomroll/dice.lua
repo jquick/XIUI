@@ -51,11 +51,14 @@ M.CenteredText = function(drawList, text, centerX, centerY, size, argbColor)
 end
 
 -- Face already has contrast; global bold/outline turns the numeral into a blob.
-local function DrawNumeral(drawList, text, centerX, centerY, size, argbColor, fontSettings)
+local function DrawNumeral(drawList, text, boxX, boxY, boxSize, fontSize, argbColor, fontSettings)
     imtext.SetConfig(fontSettings.font_family or 'Tahoma', false, 0);
 
-    local width, height = imtext.Measure(text, size);
-    imtext.DrawSimple(drawList, text, centerX - width / 2, centerY - height / 2, argbColor, size);
+    local width, height = imtext.Measure(text, fontSize);
+    imtext.DrawSimple(drawList, text,
+        boxX + math.floor((boxSize - width) / 2 + 0.5),
+        boxY + math.floor(boxSize * 0.45 - height / 2 + 0.5),
+        argbColor, fontSize);
 
     imtext.SetConfigFromSettings(fontSettings);
 end
@@ -134,6 +137,10 @@ local function DrawShadow(drawList, x, y, size, rounding)
 end
 
 M.Draw = function(drawList, x, y, size, state, clock, fontSettings)
+    -- Snap once; face, numeral, and effects all sit in this pixel box.
+    x = math.floor(x + 0.5);
+    y = math.floor(y + 0.5);
+    size = math.floor(size + 0.5);
     local rounding = size * 0.18;
     local pulse = (math.sin(clock * 3.2) + 1) / 2;
     local styleKey = state.style or 'normal';
@@ -156,7 +163,7 @@ M.Draw = function(drawList, x, y, size, state, clock, fontSettings)
         M.Color(PALETTE[style.edge], edgeAlpha), rounding, 0, size * 0.035);
 
     local text, textScale = FaceText(state);
-    DrawNumeral(drawList, text, x + size / 2, y + size * 0.45, size * textScale,
+    DrawNumeral(drawList, text, x, y, size, size * textScale,
         NUMERAL[style.numeral], fontSettings or {});
 
     local effect = EFFECTS[styleKey];

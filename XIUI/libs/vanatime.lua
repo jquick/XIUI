@@ -54,7 +54,8 @@ M.StatusSeconds = function(raw, stamp)
         remaining = remaining + 0x100000000;
     end
 
-    return (remaining < 1) and 0 or math.ceil(remaining / 60);
+    if remaining < 0 then return 0; end
+    return remaining / 60;
 end
 
 return M;

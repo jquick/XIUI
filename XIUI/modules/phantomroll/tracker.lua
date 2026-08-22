@@ -14,7 +14,7 @@ local SYNC_INTERVAL = 0.15;
 
 local slots = {};
 local rollSequence = 0;
-local doubleUpExpiresAt = nil;
+local doubleUp = nil;
 local lastSyncAt = 0;
 
 -- Reused across Sync calls so we do not allocate every poll.
@@ -35,18 +35,22 @@ local function HorizonMode()
     return settings ~= nil and settings.horizonMode == true;
 end
 
--- Seed a packet-time countdown; Sync replaces it once the buff is readable.
-local function ArmCountdown(entry)
+local function ArmTimer(entry, duration)
     local now = os.clock();
-    entry.expiresAt = now + data.BASE_DURATION;
-    entry.duration = data.BASE_DURATION;
+    entry.expiresAt = now + duration;
+    entry.duration = duration;
     entry.pending = true;
 end
 
-local function ApplyTimer(entry, seconds, now)
+-- Packet is after animation; adopt a readable status timer once, then coast.
+local function SnapTimer(entry, seconds, now)
+    if entry == nil or not entry.pending then return; end
     if seconds == nil or seconds < 0 then return; end
     entry.expiresAt = now + seconds;
-    entry.duration = math.max(entry.duration or seconds, seconds);
+    if seconds > 0 then
+        entry.duration = math.max(entry.duration or seconds, seconds);
+    end
+    entry.pending = false;
 end
 
 -- Split presence from readable timers so an unreadable stamp is not "missing".
@@ -81,31 +85,23 @@ local function ReadRollBuffs()
     return true;
 end
 
--- Matching live roll, else a free seat, else the soonest-expiring live roll.
+-- Reuse this roll, else an empty seat, else the live roll that expires first.
 -- Never evicts a bust (Hunter replacing Chaos must leave a busted seat).
 local function ClaimSlot(statusId)
-    local empty, victim, shortest = nil, nil, math.huge;
+    local empty, oldest, shortest = nil, nil, math.huge;
     for i = 1, MAX_SLOTS do
         local entry = slots[i];
         if entry == nil then
             empty = empty or i;
-        elseif not entry.busted and entry.status == statusId then
-            return i;
         elseif not entry.busted then
+            if entry.status == statusId then return i; end
             local left = Remaining(entry.expiresAt);
             if left < shortest then
-                victim, shortest = i, left;
+                oldest, shortest = i, left;
             end
         end
     end
-    return empty or victim;
-end
-
-local function EmptySlot()
-    for i = 1, MAX_SLOTS do
-        if slots[i] == nil then return i; end
-    end
-    return nil;
+    return empty or oldest;
 end
 
 local function RollTotal(actionPacket, serverId)
@@ -139,38 +135,41 @@ M.HandleActionPacket = function(actionPacket)
     if index == nil then return; end
 
     local entry = slots[index];
-    if entry == nil or entry.busted or entry.status ~= def.status then
+    local reuse = entry ~= nil and entry.status == def.status;
+    if not reuse then
         entry = { ability = def.ability, status = def.status, sequence = 0 };
         slots[index] = entry;
     end
+    -- This server resets roll duration on Double-Up as well as a new roll.
+    ArmTimer(entry, data.BASE_DURATION);
 
     rollSequence = rollSequence + 1;
     entry.total = total;
     entry.sequence = rollSequence;
     entry.busted = total > data.MAX_TOTAL;
     entry.context = data.Context(HorizonMode());
-    ArmCountdown(entry);
-    if entry.busted then doubleUpExpiresAt = nil; end
+    if entry.busted then
+        doubleUp = nil;
+    elseif not reuse then
+        doubleUp = {};
+        ArmTimer(doubleUp, data.DOUBLE_UP_DURATION);
+    end
     lastSyncAt = 0;
 end
 
-M.DoubleUpIndex = function()
-    if Remaining(doubleUpExpiresAt) <= 0 then return nil; end
+M.DoubleUp = function()
+    local seconds = Remaining(doubleUp and doubleUp.expiresAt);
+    if seconds <= 0 then return nil, 0; end
 
-    local best, bestSequence = nil, 0;
+    local best = nil;
     for i = 1, MAX_SLOTS do
         local entry = slots[i];
-        if entry ~= nil and entry.sequence > bestSequence then
-            best, bestSequence = i, entry.sequence;
+        if entry ~= nil and (best == nil or entry.sequence > slots[best].sequence) then
+            best = i;
         end
     end
-
-    if best ~= nil and slots[best].busted then return nil; end
-    return best;
-end
-
-M.DoubleUpSeconds = function()
-    return Remaining(doubleUpExpiresAt);
+    if best == nil or slots[best].busted then return nil, seconds; end
+    return best, seconds;
 end
 
 M.Sync = function()
@@ -185,44 +184,42 @@ M.Sync = function()
         if entry ~= nil then
             if entry.busted then
                 bustSeen = bustSeen + 1;
-                if bustSeen > bustTimesN and not entry.pending then
-                    slots[i] = nil;
+                if bustSeen > bustTimesN then
+                    if not entry.pending then slots[i] = nil; end
                 else
-                    if bustTimesN > 0 then entry.pending = false; end
-                    ApplyTimer(entry, bustTimesBuf[bustSeen], now);
+                    SnapTimer(entry, bustTimesBuf[bustSeen], now);
                 end
             elseif not presentBuf[entry.status] then
                 if not entry.pending then slots[i] = nil; end
             else
-                entry.pending = false;
-                ApplyTimer(entry, timersBuf[entry.status], now);
+                SnapTimer(entry, timersBuf[entry.status], now);
             end
         end
     end
 
-    -- Extra 309s with no packet seat (e.g. bust before we saw the roll).
-    for n = bustSeen + 1, bustTimesN do
-        local seat = EmptySlot();
-        if seat == nil then break; end
-        local entry = {
-            status = data.BUST_STATUS,
-            total = data.BUST_TOTAL,
-            sequence = 0,
-            busted = true,
-            pending = false,
-        };
-        ApplyTimer(entry, bustTimesBuf[n], now);
-        slots[seat] = entry;
+    -- Leftover 309s with no packet seat go in empty slots.
+    for i = 1, MAX_SLOTS do
+        if slots[i] == nil and bustSeen < bustTimesN then
+            bustSeen = bustSeen + 1;
+            local seconds = bustTimesBuf[bustSeen] or 0;
+            slots[i] = {
+                status = data.BUST_STATUS,
+                total = data.BUST_TOTAL,
+                sequence = 0,
+                busted = true,
+                pending = false,
+                expiresAt = now + seconds,
+                duration = math.max(seconds, 1),
+            };
+        end
     end
 
-    if not presentBuf[data.DOUBLE_UP_STATUS] then
-        doubleUpExpiresAt = nil;
-        return;
-    end
+    if doubleUp == nil then return; end
 
-    local seconds = timersBuf[data.DOUBLE_UP_STATUS];
-    if seconds ~= nil and seconds >= 0 then
-        doubleUpExpiresAt = now + seconds;
+    if presentBuf[data.DOUBLE_UP_STATUS] then
+        SnapTimer(doubleUp, timersBuf[data.DOUBLE_UP_STATUS], now);
+    elseif not doubleUp.pending then
+        doubleUp = nil;
     end
 end
 
@@ -231,18 +228,8 @@ M.SecondsLeft = function(entry)
     return Remaining(entry.expiresAt);
 end
 
-M.Fraction = function(entry)
-    local remaining = M.SecondsLeft(entry);
-    if remaining == nil then return 0; end
-
-    local duration = entry.duration;
-    if duration == nil or duration <= 0 then duration = data.BASE_DURATION; end
-
-    return math.min(1, math.max(0, remaining / duration));
-end
-
 M.Slots = function()
-    return slots, MAX_SLOTS;
+    return slots;
 end
 
 M.HasAny = function()
@@ -252,7 +239,7 @@ end
 M.Clear = function()
     slots = {};
     rollSequence = 0;
-    doubleUpExpiresAt = nil;
+    doubleUp = nil;
     lastSyncAt = 0;
 end
 
@@ -269,7 +256,6 @@ M.Demo = function()
             total = total,
             sequence = sequence,
             busted = false,
-            pending = false,
             expiresAt = now + left,
             duration = data.BASE_DURATION,
             context = context,
@@ -281,7 +267,7 @@ M.Demo = function()
         DemoSeat(chaos, chaos.unlucky, 154, 2),
     };
     rollSequence = 2;
-    doubleUpExpiresAt = now + 32;
+    doubleUp = { expiresAt = now + 32, duration = data.DOUBLE_UP_DURATION };
 end
 
 return M;

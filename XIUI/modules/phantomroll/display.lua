@@ -39,20 +39,17 @@ local BAR_FILL = {
 local BAR_BACKDROP = { 0.10, 0.11, 0.13, 0.80 };
 local BAR_BORDER = { 0, 0, 0, 1 };
 
--- Cached so we do not re-measure "Bust 100%" every frame.
-local oddsReserve = { oddsSize = nil, width = 0 };
-
 local function FormatClock(seconds)
     if seconds == nil then return ''; end
     if seconds < 0 then return '--:--'; end
 
-    local whole = math.floor(seconds + 0.5);
+    local whole = math.floor(seconds);
     return string.format('%d:%02d', math.floor(whole / 60), whole % 60);
 end
 
 local function FormatSeconds(seconds)
     if seconds == nil or seconds < 0 then return ''; end
-    return tostring(math.floor(seconds + 0.5));
+    return tostring(math.floor(seconds));
 end
 
 local function BarFill(seconds)
@@ -97,13 +94,16 @@ local function BuildColumn(entry, horizonMode, canDoubleUp, doubleUpSeconds)
         nameColor, potencyColor = TEXT.labelCold, TEXT.potencyCold;
     end
 
+    local duration = math.max(entry.duration or data.BASE_DURATION, 1);
+    local fraction = (seconds ~= nil) and math.min(1, math.max(0, seconds / duration)) or 0;
+
     return {
         name = (def and def.name or (entry.busted and 'Bust' or '?')):upper(),
         potency = data.PotencyText(def, entry.total, entry.context),
         odds = oddsText,
         oddsTimer = oddsTimer,
         clock = FormatClock(seconds),
-        fraction = tracker.Fraction(entry),
+        fraction = fraction,
         state = { total = entry.total, style = style },
         nameColor = nameColor,
         potencyColor = potencyColor,
@@ -118,9 +118,14 @@ local function DrawBar(drawList, x, y, width, height, column)
         dice.Color(BAR_BACKDROP), rounding);
 
     if column.fraction > 0 then
-        local fillWidth = math.max(rounding, width * column.fraction);
-        drawList:AddRectFilled({ x, y }, { x + fillWidth, y + height },
-            dice.Color(column.fill), rounding);
+        -- Inset fill so AA stays in the track (bar 2's left sits in the gap).
+        local inset = 1;
+        local innerRounding = math.max(0, rounding - inset);
+        local fillRight = x + math.max(inset, width * column.fraction - inset);
+        drawList:PushClipRect({ x + inset, y + inset }, { fillRight, y + height - inset }, true);
+        drawList:AddRectFilled({ x + inset, y + inset }, { x + width - inset, y + height - inset },
+            dice.Color(column.fill), innerRounding);
+        drawList:PopClipRect();
     end
 
     -- Same idea as player/target bars: a thin stroke around the fill.
@@ -133,36 +138,24 @@ end
 
 M.DrawWindow = function(settings)
     local dieSize = settings.dieSize;
-    local gap = dieSize * 0.26;
+    local gap = dieSize * 0.50;
     local rowGap = dieSize * 0.09;
     local nameGap = dieSize * 0.30;      -- clears flame tips above the die
     local iceHeadroom = dieSize * 0.32;  -- room for icicles below
 
     imtext.SetConfigFromSettings(settings.font_settings);
 
-    local slots, slotCount = tracker.Slots();
-    local doubleUpIndex = tracker.DoubleUpIndex();
-    local doubleUpSeconds = tracker.DoubleUpSeconds();
+    local slots = tracker.Slots();
+    local doubleUpIndex, doubleUpSeconds = tracker.DoubleUp();
 
     local columns = {};
     local columnWidth = dieSize * 1.35;
     local oddsGap = settings.oddsSize * 0.45;
-    if oddsReserve.oddsSize ~= settings.oddsSize then
-        local w = imtext.Measure('Bust 100%', settings.oddsSize);
-        local t = imtext.Measure('45', settings.oddsSize);
-        oddsReserve.oddsSize = settings.oddsSize;
-        oddsReserve.width = w + oddsGap + t;
-    end
-    columnWidth = math.max(columnWidth, oddsReserve.width);
 
-    for i = 1, slotCount do
+    for i = 1, 2 do
         if slots[i] ~= nil then
-            local column = BuildColumn(
+            columns[#columns + 1] = BuildColumn(
                 slots[i], settings.horizonMode, i == doubleUpIndex, doubleUpSeconds);
-            columns[#columns + 1] = column;
-            columnWidth = math.max(columnWidth,
-                imtext.Measure(column.name, settings.nameSize),
-                imtext.Measure(column.potency, settings.potencySize));
         end
     end
 
