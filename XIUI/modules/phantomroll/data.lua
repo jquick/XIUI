@@ -211,7 +211,7 @@ M.Potency = function(roll, total, context)
 
         if roll.perLevel then
             local level = context.level or 0;
-            if level <= 0 then return nil; end
+            if level < 1 then level = 75; end
             power = math.floor(power * level / 75);
         end
     end

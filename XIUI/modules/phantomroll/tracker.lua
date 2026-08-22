@@ -244,10 +244,10 @@ M.Clear = function()
 end
 
 M.Demo = function()
-    local hunters = data.ByAbility(108);
-    local chaos = data.ByAbility(105);
+    local horizon = HorizonMode();
+    local hunters = data.ByAbility(108, horizon);
+    local chaos = data.ByAbility(105, horizon);
     local now = os.clock();
-    local context = data.Context(HorizonMode());
 
     local function DemoSeat(roll, total, left, sequence)
         return {
@@ -258,7 +258,6 @@ M.Demo = function()
             busted = false,
             expiresAt = now + left,
             duration = data.BASE_DURATION,
-            context = context,
         };
     end
 

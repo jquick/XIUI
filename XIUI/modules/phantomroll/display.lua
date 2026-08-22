@@ -99,7 +99,7 @@ local function BuildColumn(entry, horizonMode, canDoubleUp, doubleUpSeconds)
 
     return {
         name = (roll and roll.name or (entry.busted and 'Bust' or '?')):upper(),
-        potency = data.PotencyText(roll, entry.total, entry.context),
+        potency = data.PotencyText(roll, entry.total, entry.context or data.Context(horizonMode)),
         odds = oddsText,
         oddsTimer = oddsTimer,
         clock = FormatClock(seconds),
