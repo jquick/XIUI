@@ -71,16 +71,16 @@ local function OddsText(entry, canDoubleUp)
         (bust >= 0.5) and TEXT.risk or TEXT.warn;
 end
 
-local function DieStyle(entry, def)
+local function DieStyle(entry, roll)
     if entry.busted then return 'bust'; end
-    if data.IsLucky(def, entry.total) then return 'hot'; end
-    if data.IsUnlucky(def, entry.total) then return 'cold'; end
+    if data.IsLucky(roll, entry.total) then return 'hot'; end
+    if data.IsUnlucky(roll, entry.total) then return 'cold'; end
     return 'normal';
 end
 
 local function BuildColumn(entry, horizonMode, canDoubleUp, doubleUpSeconds)
-    local def = data.ByAbility(entry.ability, horizonMode);
-    local style = DieStyle(entry, def);
+    local roll = data.ByAbility(entry.ability, horizonMode);
+    local style = DieStyle(entry, roll);
     local seconds = tracker.SecondsLeft(entry);
     local oddsText, oddsColor = OddsText(entry, canDoubleUp);
     local oddsTimer = (canDoubleUp and oddsText ~= '') and FormatSeconds(doubleUpSeconds) or '';
@@ -98,8 +98,8 @@ local function BuildColumn(entry, horizonMode, canDoubleUp, doubleUpSeconds)
     local fraction = (seconds ~= nil) and math.min(1, math.max(0, seconds / duration)) or 0;
 
     return {
-        name = (def and def.name or (entry.busted and 'Bust' or '?')):upper(),
-        potency = data.PotencyText(def, entry.total, entry.context),
+        name = (roll and roll.name or (entry.busted and 'Bust' or '?')):upper(),
+        potency = data.PotencyText(roll, entry.total, entry.context),
         odds = oddsText,
         oddsTimer = oddsTimer,
         clock = FormatClock(seconds),

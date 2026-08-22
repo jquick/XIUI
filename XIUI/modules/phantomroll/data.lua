@@ -114,16 +114,16 @@ local function BuildIndex(useHorizon)
     local byAbility = {};
 
     for _, base in ipairs(ROLLS) do
-        local def = base;
+        local roll = base;
         local override = useHorizon and HORIZON.rolls[base.name];
 
         if override then
-            def = {};
-            for key, value in pairs(base) do def[key] = value; end
-            for key, value in pairs(override) do def[key] = value; end
+            roll = {};
+            for key, value in pairs(base) do roll[key] = value; end
+            for key, value in pairs(override) do roll[key] = value; end
         end
 
-        byAbility[base.ability] = def;
+        byAbility[base.ability] = roll;
     end
 
     return byAbility;
@@ -197,26 +197,26 @@ M.Context = function(horizonMode)
     };
 end
 
-M.Potency = function(def, total, context)
-    if def == nil or def.unknown or total == nil then return nil; end
+M.Potency = function(roll, total, context)
+    if roll == nil or roll.unknown or total == nil then return nil; end
     context = context or {};
 
-    local power = def.powers[total];
+    local power = roll.powers[total];
     if power == nil then return nil; end
 
     if total <= M.MAX_TOTAL then
         local partyJobs = context.partyJobs or {};
-        if partyJobs[def.job] then power = power + def.bonus; end
-        power = power + def.step * (context.gear or 0);
+        if partyJobs[roll.job] then power = power + roll.bonus; end
+        power = power + roll.step * (context.gear or 0);
 
-        if def.perLevel then
+        if roll.perLevel then
             local level = context.level or 0;
             if level <= 0 then return nil; end
             power = math.floor(power * level / 75);
         end
     end
 
-    return power / (def.scale or 1);
+    return power / (roll.scale or 1);
 end
 
 local function FormatValue(value)
@@ -226,13 +226,13 @@ local function FormatValue(value)
     return string.format('%.1f', math.abs(value));
 end
 
-M.PotencyText = function(def, total, context)
-    local value = M.Potency(def, total, context);
-    if value == nil or def == nil then return ''; end
+M.PotencyText = function(roll, total, context)
+    local value = M.Potency(roll, total, context);
+    if value == nil or roll == nil then return ''; end
 
     local sign = (value < 0) and '-' or '+';
-    local unit = (def.unit == PCT) and '%' or '';
-    return string.format('%s%s%s %s', sign, FormatValue(value), unit, def.stat);
+    local unit = (roll.unit == PCT) and '%' or '';
+    return string.format('%s%s%s %s', sign, FormatValue(value), unit, roll.stat);
 end
 
 M.BustChance = function(total)
@@ -240,12 +240,12 @@ M.BustChance = function(total)
     return math.max(0, total - 5) / 6;
 end
 
-M.IsLucky = function(def, total)
-    return def ~= nil and total ~= nil and (total == M.MAX_TOTAL or total == def.lucky);
+M.IsLucky = function(roll, total)
+    return roll ~= nil and total ~= nil and (total == M.MAX_TOTAL or total == roll.lucky);
 end
 
-M.IsUnlucky = function(def, total)
-    return def ~= nil and total ~= nil and total == def.unlucky;
+M.IsUnlucky = function(roll, total)
+    return roll ~= nil and total ~= nil and total == roll.unlucky;
 end
 
 return M;

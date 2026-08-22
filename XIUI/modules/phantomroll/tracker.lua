@@ -9,7 +9,7 @@ local vanatime = require('libs.vanatime');
 local M = {};
 
 local MAX_SLOTS = 2;
--- Bars interpolate from expiresAt; poll buffs a few times a second to refresh/clear.
+-- Bars countdown from expiresAt; poll buffs a few times a second to snap/clear.
 local SYNC_INTERVAL = 0.15;
 
 local slots = {};
@@ -53,7 +53,7 @@ local function SnapTimer(entry, seconds, now)
     entry.pending = false;
 end
 
--- Split presence from readable timers so an unreadable stamp is not "missing".
+-- Presence and remaining are separate: a live buff can have no readable stamp yet.
 local function ReadRollBuffs()
     local player = AshitaCore:GetMemoryManager():GetPlayer();
     if player == nil then return false; end
@@ -121,8 +121,8 @@ end
 M.HandleActionPacket = function(actionPacket)
     if actionPacket == nil or actionPacket.Type ~= data.JOB_ABILITY_CATEGORY then return; end
 
-    local def = data.ByAbility(actionPacket.Param);
-    if def == nil then return; end
+    local roll = data.ByAbility(actionPacket.Param);
+    if roll == nil then return; end
 
     local party = AshitaCore:GetMemoryManager():GetParty();
     local serverId = party and party:GetMemberServerId(0);
@@ -131,13 +131,13 @@ M.HandleActionPacket = function(actionPacket)
     local total = RollTotal(actionPacket, serverId);
     if total == nil then return; end
 
-    local index = ClaimSlot(def.status);
+    local index = ClaimSlot(roll.status);
     if index == nil then return; end
 
     local entry = slots[index];
-    local reuse = entry ~= nil and entry.status == def.status;
+    local reuse = entry ~= nil and entry.status == roll.status;
     if not reuse then
-        entry = { ability = def.ability, status = def.status, sequence = 0 };
+        entry = { ability = roll.ability, status = roll.status, sequence = 0 };
         slots[index] = entry;
     end
     -- This server resets roll duration on Double-Up as well as a new roll.
@@ -249,10 +249,10 @@ M.Demo = function()
     local now = os.clock();
     local context = data.Context(HorizonMode());
 
-    local function DemoSeat(def, total, left, sequence)
+    local function DemoSeat(roll, total, left, sequence)
         return {
-            ability = def.ability,
-            status = def.status,
+            ability = roll.ability,
+            status = roll.status,
             total = total,
             sequence = sequence,
             busted = false,

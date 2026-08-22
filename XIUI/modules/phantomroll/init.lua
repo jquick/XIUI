@@ -34,7 +34,7 @@ M.DrawWindow = function(settings)
     if hidden or settings == nil then return; end
 
     if not UpdatePreview() then
-        -- No seats: nothing to sync (packets create seats; Sync only refreshes/clears).
+        -- No seats: nothing to sync (packets create seats; Sync only snaps/clears).
         if not tracker.HasAny() then return; end
         tracker.Sync();
         if not tracker.HasAny() then return; end
